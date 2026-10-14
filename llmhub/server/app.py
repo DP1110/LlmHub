@@ -400,6 +400,21 @@ def create_app() -> FastAPI:
             return FileResponse(str(index_file), media_type="text/html")
         return HTMLResponse("<html><body><h1>LLMHub Server Running</h1></body></html>")
 
+    @app.get("/logo.svg")
+    @app.get("/favicon.ico")
+    async def get_logo_svg() -> Response:
+        svg_file = static_dir / "logo.svg"
+        if svg_file.exists():
+            return FileResponse(str(svg_file), media_type="image/svg+xml")
+        raise HTTPException(status_code=404, detail="logo.svg not found")
+
+    @app.get("/logo.jpg")
+    async def get_logo_jpg() -> Response:
+        jpg_file = static_dir / "logo.jpg"
+        if jpg_file.exists():
+            return FileResponse(str(jpg_file), media_type="image/jpeg")
+        raise HTTPException(status_code=404, detail="logo.jpg not found")
+
     @app.get("/metrics")
     async def get_metrics() -> Response:
         """Expose Prometheus 0.0.4 metrics exposition."""

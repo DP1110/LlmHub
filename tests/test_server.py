@@ -317,3 +317,8 @@ def test_web_gui_and_logo_endpoints(client):
     assert resp_jpg.status_code == 200
     assert len(resp_jpg.content) > 1000
 
+    # 5. Test root /logo.svg and /favicon.ico
+    assert client.get("/logo.svg").status_code == 200
+    assert client.get("/favicon.ico").status_code == 200
+
+

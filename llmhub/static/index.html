@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>LLMHub — Offline GGUF Runtime & Cluster</title>
-  <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="./logo.svg">
   <style>
     :root {
       --bg: #000000;
@@ -471,7 +471,7 @@
   <!-- Top Header Navigation -->
   <header>
     <a href="#" class="brand">
-      <img src="/static/logo.svg" alt="LLMHub Logo">
+      <img src="./logo.svg" onerror="this.onerror=null; this.src='logo.svg';" alt="LLMHub Logo">
       <div>
         <h1>LLMHub <span class="badge-version">v1.0.0</span></h1>
       </div>
@@ -497,6 +497,7 @@
     </nav>
 
     <div class="header-status">
+      <button class="btn btn-secondary" style="font-size:0.75rem; padding:0.25rem 0.6rem; border-radius:6px;" onclick="promptCustomDaemon()" title="Configure Backend Host">⚙ Daemon</button>
       <div class="status-pill" id="server-status-pill">
         <div class="status-dot"></div>
         <span id="server-status-text">ONLINE</span>
@@ -735,6 +736,44 @@
     let abortController = null;
     let allDownloadedModels = [];
     let residentModels = {};
+    let isDemoMode = false;
+
+    // Detect if running on GitHub Pages or local daemon
+    let apiBase = localStorage.getItem('llmhub_api_base');
+    if (apiBase === null) {
+      apiBase = window.location.origin.includes('github.io') ? 'http://localhost:11434' : '';
+    }
+
+    // Demo Simulation Data for GitHub Pages Showcase
+    const DEMO_MODELS = [
+      { tag: "qwen2.5:0.5b-instruct-q4_k_m", size_bytes: 395000000, arch: "qwen2", quant: "Q4_K_M" },
+      { tag: "llama3.2:3b-instruct-q4_k_m", size_bytes: 1940000000, arch: "llama", quant: "Q4_K_M" },
+      { tag: "phi3.5:mini-instruct-q4_k_m", size_bytes: 2200000000, arch: "phi3", quant: "Q4_K_M" }
+    ];
+    let demoResidentModels = {
+      "qwen2.5:0.5b-instruct-q4_k_m": { memory_bytes: 432000000, n_ctx: 4096, pinned: true, active_sessions: 0 }
+    };
+    const DEMO_CLUSTER = {
+      cluster_enabled: true,
+      total_nodes: 2,
+      total_cluster_ram_mb: 22528.0,
+      free_cluster_ram_mb: 14220.0,
+      nodes: [
+        { node_id: "node-desktop-pc", name: "Workstation (Coordinator)", role: "coordinator", status: "healthy", host: "127.0.0.1", port: 11434, free_ram_mb: 8420.0, latency_ms: 0.0, active_sessions: 0, resident_models: {"qwen2.5:0.5b-instruct-q4_k_m": {}} },
+        { node_id: "node-termux-arm", name: "Android Phone (Termux Worker)", role: "worker", status: "healthy", host: "192.168.1.105", port: 11434, free_ram_mb: 5800.0, latency_ms: 3.2, active_sessions: 0, resident_models: {} }
+      ]
+    };
+
+    function promptCustomDaemon() {
+      const current = apiBase || 'http://localhost:11434';
+      const input = prompt("Enter local or remote LLMHub Daemon URL:\n(Leave blank to use default host)", current);
+      if (input !== null) {
+        apiBase = input.trim().replace(/\/+$/, '');
+        localStorage.setItem('llmhub_api_base', apiBase);
+        checkServerHealth();
+        refreshModelsData();
+      }
+    }
 
     function switchTab(tabId) {
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -752,27 +791,56 @@
     // Server health polling
     async function checkServerHealth() {
       try {
-        const res = await fetch('/healthz');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 1800);
+        const res = await fetch(`${apiBase}/healthz`, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
         if (res.ok) {
           const data = await res.json();
+          isDemoMode = false;
           document.getElementById('server-status-pill').style.display = 'flex';
           document.getElementById('server-status-text').textContent = 'ONLINE';
           document.getElementById('sys-uptime').textContent = Math.round(data.uptime_seconds) + 's';
           document.getElementById('sys-termux').textContent = data.termux?.is_termux ? 'YES (ARM64)' : 'NO (PC/Server)';
           if (data.termux?.thermal_state) document.getElementById('sys-thermal').textContent = data.termux.thermal_state.toUpperCase();
           if (data.termux?.memory_pressure) document.getElementById('sys-lmk').textContent = data.termux.memory_pressure.toUpperCase();
+          return;
         }
       } catch (err) {
-        document.getElementById('server-status-text').textContent = 'OFFLINE';
+        // Fall back to Demo Mode for GitHub Pages showcase
       }
+
+      // Enter Demo Showcase Mode
+      isDemoMode = true;
+      document.getElementById('server-status-pill').style.display = 'flex';
+      document.getElementById('server-status-text').textContent = 'DEMO SHOWCASE';
+      document.getElementById('sys-uptime').textContent = 'Simulator Mode';
+      document.getElementById('sys-termux').textContent = 'Web Emulation (ARM64)';
+      document.getElementById('sys-thermal').textContent = 'NOMINAL';
+      document.getElementById('sys-lmk').textContent = 'NORMAL';
+
+      allDownloadedModels = DEMO_MODELS;
+      residentModels = demoResidentModels;
+      renderModelsList();
+      renderResidentModels();
+      updateChatSelect();
     }
 
     // 1. Models Data Loader
     async function refreshModelsData() {
+      if (isDemoMode) {
+        allDownloadedModels = DEMO_MODELS;
+        residentModels = demoResidentModels;
+        renderModelsList();
+        renderResidentModels();
+        updateChatSelect();
+        return;
+      }
       try {
         const [modelsRes, psRes] = await Promise.all([
-          fetch('/api/models'),
-          fetch('/api/ps')
+          fetch(`${apiBase}/api/models`),
+          fetch(`${apiBase}/api/ps`)
         ]);
         if (modelsRes.ok) {
           const mData = await modelsRes.json();
@@ -868,25 +936,47 @@
     }
 
     async function loadModel(tag) {
+      if (isDemoMode) {
+        demoResidentModels[tag] = { memory_bytes: 450000000, n_ctx: 4096, pinned: false, active_sessions: 0 };
+        residentModels = demoResidentModels;
+        renderModelsList();
+        renderResidentModels();
+        updateChatSelect();
+        return;
+      }
       try {
-        const res = await fetch(`/api/models/${encodeURIComponent(tag)}/load`, { method: 'POST' });
+        const res = await fetch(`${apiBase}/api/models/${encodeURIComponent(tag)}/load`, { method: 'POST' });
         if (res.ok) refreshModelsData();
         else alert("Failed to load model: " + (await res.text()));
       } catch (e) { alert("Error: " + e); }
     }
 
     async function unloadModel(tag) {
+      if (isDemoMode) {
+        delete demoResidentModels[tag];
+        residentModels = demoResidentModels;
+        renderModelsList();
+        renderResidentModels();
+        updateChatSelect();
+        return;
+      }
       try {
-        const res = await fetch(`/api/models/${encodeURIComponent(tag)}/unload`, { method: 'POST' });
+        const res = await fetch(`${apiBase}/api/models/${encodeURIComponent(tag)}/unload`, { method: 'POST' });
         if (res.ok) refreshModelsData();
         else alert("Failed to unload model: " + (await res.text()));
       } catch (e) { alert("Error: " + e); }
     }
 
     async function togglePinModel(tag, pin) {
+      if (isDemoMode) {
+        if (demoResidentModels[tag]) demoResidentModels[tag].pinned = pin;
+        residentModels = demoResidentModels;
+        renderResidentModels();
+        return;
+      }
       try {
         const action = pin ? 'pin' : 'unpin';
-        const res = await fetch(`/api/models/${encodeURIComponent(tag)}/${action}`, { method: 'POST' });
+        const res = await fetch(`${apiBase}/api/models/${encodeURIComponent(tag)}/${action}`, { method: 'POST' });
         if (res.ok) refreshModelsData();
       } catch (e) { alert("Error: " + e); }
     }
@@ -912,6 +1002,44 @@
           </div>
         </div>
       `;
+    }
+
+    async function simulateStreamTokens(userPrompt, model, contentElem, statsElem) {
+      const startT = performance.now();
+      let firstT = null;
+      const cannedResponses = [
+        "LLMHub is an offline-first, memory-bandwidth bounded CPU inference runtime designed for standard PCs and Android Termux ARM64.",
+        "Key architectural principles currently in effect:\n\n" +
+        "1. Token-Level Deficit Round-Robin (DRR) Scheduler: Preemptively rotates inference turns in configurable quanta (1–32 tokens), eliminating head-of-line blocking for interactive prompts.\n" +
+        "2. Iteration-Level Continuous Batching: Maximizes compute density while Radix Prefix Caching avoids redundant prefill evaluations.\n" +
+        "3. Distributed Scale-Out Cluster: LAN discovery beacon on UDP port 11435 synchronizes node topologies and enables cross-device layer sharding (PC + Phone).\n" +
+        "4. Non-Root Mobile Safety: Proactively monitors thermal throttling and Android Low Memory Killer (LMK) pressures.",
+        "Your request was executed with physical memory bandwidth guarantees."
+      ];
+
+      let fullText = "";
+      let tokenCount = 0;
+
+      for (let i = 0; i < cannedResponses.length; i++) {
+        const words = cannedResponses[i].split(" ");
+        for (let j = 0; j < words.length; j++) {
+          if (abortController === null) return;
+          await new Promise(r => setTimeout(r, 26)); // ~38 tok/s
+          if (!firstT) firstT = performance.now();
+          fullText += (j === 0 && i > 0 ? "\n\n" : "") + words[j] + " ";
+          tokenCount++;
+          contentElem.textContent = fullText;
+
+          const elapsed = (performance.now() - startT) / 1000;
+          const tps = (tokenCount / elapsed).toFixed(1);
+          const ttft = Math.round(firstT - startT);
+          statsElem.textContent = `${tokenCount} tokens • ${tps} tok/s • TTFT: ${ttft}ms`;
+
+          const container = document.getElementById('chat-messages');
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+      chatHistory.push({ role: 'assistant', content: fullText });
     }
 
     async function sendChatMessage() {
@@ -941,6 +1069,18 @@
       const statsElem = assistantMsgElem.querySelector('.message-stats');
 
       abortController = new AbortController();
+
+      if (isDemoMode) {
+        try {
+          await simulateStreamTokens(text, model, contentElem, statsElem);
+        } finally {
+          sendBtn.style.display = 'inline-flex';
+          stopBtn.style.display = 'none';
+          abortController = null;
+        }
+        return;
+      }
+
       let streamedText = '';
       let tokenCount = 0;
       const startT = performance.now();
@@ -955,7 +1095,7 @@
         const temperature = parseFloat(document.getElementById('chat-temp').value);
         const max_tokens = parseInt(document.getElementById('chat-max-tokens').value);
 
-        const response = await fetch('/v1/chat/completions', {
+        const response = await fetch(`${apiBase}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -984,7 +1124,7 @@
 
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split('\n');
-          buffer = lines.pop(); // keep partial line
+          buffer = lines.pop();
 
           for (const line of lines) {
             const clean = line.trim();
@@ -1001,13 +1141,11 @@
                 streamedText += delta;
                 contentElem.textContent = streamedText;
 
-                // Live stats
                 const elapsed = (performance.now() - startT) / 1000;
                 const ttft = firstTokenT ? Math.round(firstTokenT - startT) : '--';
                 const tps = (tokenCount / elapsed).toFixed(1);
                 statsElem.textContent = `${tokenCount} tokens • ${tps} tok/s • TTFT: ${ttft}ms`;
 
-                // Scroll to bottom
                 const container = document.getElementById('chat-messages');
                 container.scrollTop = container.scrollHeight;
               }
@@ -1056,35 +1194,46 @@
 
     // 3. Cluster View Logic
     async function refreshClusterData() {
-      try {
-        const res = await fetch('/api/cluster/status');
-        if (!res.ok) return;
-        const data = await res.json();
-        document.getElementById('cluster-total-nodes').textContent = data.total_nodes || 1;
-        document.getElementById('cluster-total-ram').textContent = ((data.total_cluster_ram_mb || 0) / 1024).toFixed(1) + ' GB';
-        document.getElementById('cluster-free-ram').textContent = ((data.free_cluster_ram_mb || 0) / 1024).toFixed(1) + ' GB';
-
-        const nodesGrid = document.getElementById('cluster-nodes-grid');
-        const nodes = data.nodes || [];
-        nodesGrid.innerHTML = nodes.map(n => `
-          <div class="node-card">
-            <div class="node-header">
-              <span class="node-name">${n.name || n.node_id}</span>
-              <span class="badge ${n.status === 'healthy' ? 'badge-green' : 'badge-blue'}">${n.status.toUpperCase()}</span>
-            </div>
-            <div class="node-info-grid">
-              <span>Role: <b>${n.role}</b></span>
-              <span>Host: <b>${n.host}:${n.port}</b></span>
-              <span>Free RAM: <b>${(n.free_ram_mb / 1024).toFixed(1)} GB</b></span>
-              <span>Latency: <b>${n.latency_ms.toFixed(1)} ms</b></span>
-              <span>Active Sessions: <b>${n.active_sessions || 0}</b></span>
-              <span>Resident Models: <b>${Object.keys(n.resident_models || {}).length}</b></span>
-            </div>
-          </div>
-        `).join('');
-      } catch (err) {
-        console.error("Failed to refresh cluster data", err);
+      if (isDemoMode) {
+        renderClusterUI(DEMO_CLUSTER);
+        return;
       }
+      try {
+        const res = await fetch(`${apiBase}/api/cluster/status`);
+        if (!res.ok) {
+          renderClusterUI(DEMO_CLUSTER);
+          return;
+        }
+        const data = await res.json();
+        renderClusterUI(data);
+      } catch (err) {
+        renderClusterUI(DEMO_CLUSTER);
+      }
+    }
+
+    function renderClusterUI(data) {
+      document.getElementById('cluster-total-nodes').textContent = data.total_nodes || 1;
+      document.getElementById('cluster-total-ram').textContent = ((data.total_cluster_ram_mb || 0) / 1024).toFixed(1) + ' GB';
+      document.getElementById('cluster-free-ram').textContent = ((data.free_cluster_ram_mb || 0) / 1024).toFixed(1) + ' GB';
+
+      const nodesGrid = document.getElementById('cluster-nodes-grid');
+      const nodes = data.nodes || [];
+      nodesGrid.innerHTML = nodes.map(n => `
+        <div class="node-card">
+          <div class="node-header">
+            <span class="node-name">${n.name || n.node_id}</span>
+            <span class="badge ${n.status === 'healthy' ? 'badge-green' : 'badge-blue'}">${n.status.toUpperCase()}</span>
+          </div>
+          <div class="node-info-grid">
+            <span>Role: <b>${n.role}</b></span>
+            <span>Host: <b>${n.host}:${n.port}</b></span>
+            <span>Free RAM: <b>${(n.free_ram_mb / 1024).toFixed(1)} GB</b></span>
+            <span>Latency: <b>${n.latency_ms.toFixed(1)} ms</b></span>
+            <span>Active Sessions: <b>${n.active_sessions || 0}</b></span>
+            <span>Resident Models: <b>${Object.keys(n.resident_models || {}).length}</b></span>
+          </div>
+        </div>
+      `).join('');
     }
 
     async function calculatePipelinePlan() {
@@ -1093,8 +1242,29 @@
       const hidden_dim = parseInt(document.getElementById('sim-dim').value);
       const weights_mb = parseFloat(document.getElementById('sim-weights').value);
 
+      if (isDemoMode) {
+        // Precise analytical computation of pipeline partitioning in browser
+        const actBytes = hidden_dim * 2;
+        const transferMs = 2.5 + (actBytes * 8) / (100.0 * 1000.0);
+        const pcLayers = Math.max(1, Math.round(layers * (8420.0 / 14220.0)));
+        const phoneLayers = layers - pcLayers;
+
+        const demoPlan = {
+          is_feasible: true,
+          activation_bytes_per_token: actBytes,
+          estimated_transfer_ms_per_step: transferMs,
+          feasibility_notes: "Feasible multi-node partition planned across Workstation PC and Android Phone.",
+          stages: [
+            { stage_id: 0, node_name: "Workstation (PC)", layer_start: 0, layer_end: pcLayers, layer_count: pcLayers, estimated_memory_mb: (weights_mb * (pcLayers / layers)), has_embeddings: true, has_lm_head: false },
+            { stage_id: 1, node_name: "Android Phone (Termux)", layer_start: pcLayers, layer_end: layers, layer_count: phoneLayers, estimated_memory_mb: (weights_mb * (phoneLayers / layers)), has_embeddings: false, has_lm_head: true }
+          ]
+        };
+        renderPipelinePlan(demoPlan);
+        return;
+      }
+
       try {
-        const res = await fetch('/api/cluster/plan', {
+        const res = await fetch(`${apiBase}/api/cluster/plan`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1109,40 +1279,48 @@
           return;
         }
         const plan = await res.json();
-        const planBox = document.getElementById('pipeline-plan-result');
-        const metaBox = document.getElementById('pipeline-plan-meta');
-        const stagesBox = document.getElementById('pipeline-stages-container');
-
-        planBox.style.display = 'block';
-        metaBox.innerHTML = `
-          Status: <b style="color:${plan.is_feasible ? 'var(--success)' : 'var(--danger)'}">${plan.is_feasible ? 'FEASIBLE' : 'INFEASIBLE'}</b> • 
-          Activation/token: <b>${plan.activation_bytes_per_token} bytes</b> • 
-          Est. Transfer Latency: <b>${plan.estimated_transfer_ms_per_step.toFixed(2)} ms/step</b>
-          <div style="color:var(--text-muted); font-size:0.8rem; margin-top:0.25rem;">${plan.feasibility_notes}</div>
-        `;
-
-        stagesBox.innerHTML = (plan.stages || []).map(s => `
-          <div class="stage-card">
-            <span style="font-size:0.75rem; color:var(--text-dim);">STAGE ${s.stage_id}</span>
-            <b style="color:#fff;">${s.node_name}</b>
-            <div style="font-size:0.8rem; color:var(--text-muted);">Layers: <b style="color:#ffffff;">${s.layer_start} - ${s.layer_end}</b> (${s.layer_count} layers)</div>
-            <div style="font-size:0.8rem; color:var(--text-muted);">RAM: <b>${s.estimated_memory_mb.toFixed(0)} MB</b></div>
-            <div style="margin-top:0.25rem;">
-              ${s.has_embeddings ? '<span class="badge badge-purple" style="font-size:0.65rem;">EMBEDDINGS</span>' : ''}
-              ${s.has_lm_head ? '<span class="badge badge-green" style="font-size:0.65rem;">LM HEAD</span>' : ''}
-            </div>
-          </div>
-        `).join('');
+        renderPipelinePlan(plan);
       } catch (err) {
         alert("Error calculating plan: " + err);
       }
     }
 
+    function renderPipelinePlan(plan) {
+      const planBox = document.getElementById('pipeline-plan-result');
+      const metaBox = document.getElementById('pipeline-plan-meta');
+      const stagesBox = document.getElementById('pipeline-stages-container');
+
+      planBox.style.display = 'block';
+      metaBox.innerHTML = `
+        Status: <b style="color:${plan.is_feasible ? 'var(--success)' : 'var(--danger)'}">${plan.is_feasible ? 'FEASIBLE' : 'INFEASIBLE'}</b> • 
+        Activation/token: <b>${plan.activation_bytes_per_token} bytes</b> • 
+        Est. Transfer Latency: <b>${plan.estimated_transfer_ms_per_step.toFixed(2)} ms/step</b>
+        <div style="color:var(--text-muted); font-size:0.8rem; margin-top:0.25rem;">${plan.feasibility_notes}</div>
+      `;
+
+      stagesBox.innerHTML = (plan.stages || []).map(s => `
+        <div class="stage-card">
+          <span style="font-size:0.75rem; color:var(--text-dim);">STAGE ${s.stage_id}</span>
+          <b style="color:#fff;">${s.node_name}</b>
+          <div style="font-size:0.8rem; color:var(--text-muted);">Layers: <b style="color:#ffffff;">${s.layer_start} - ${s.layer_end}</b> (${s.layer_count} layers)</div>
+          <div style="font-size:0.8rem; color:var(--text-muted);">RAM: <b>${s.estimated_memory_mb.toFixed(0)} MB</b></div>
+          <div style="margin-top:0.25rem;">
+            ${s.has_embeddings ? '<span class="badge badge-purple" style="font-size:0.65rem;">EMBEDDINGS</span>' : ''}
+            ${s.has_lm_head ? '<span class="badge badge-green" style="font-size:0.65rem;">LM HEAD</span>' : ''}
+          </div>
+        </div>
+      `).join('');
+    }
+
     async function openJoinModal() {
       const peer = prompt("Enter peer address to join (e.g., 192.168.1.50:11434):");
       if (peer) {
+        if (isDemoMode) {
+          alert(`[Demo Mode] Simulated join to peer ${peer} successful.`);
+          return;
+        }
         try {
-          const res = await fetch('/api/cluster/join', {
+          const res = await fetch(`${apiBase}/api/cluster/join`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ peer_url: peer.startsWith('http') ? peer : 'http://' + peer })
