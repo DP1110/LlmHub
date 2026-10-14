@@ -12,6 +12,7 @@ import argparse
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -636,12 +637,158 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(" HTTP Health:        OFFLINE")
     print("=" * 75 + "\n")
 
+def cmd_cluster(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}", api_key=getattr(args, "api_key", None))
+
+    action = getattr(args, "cluster_action", "status") or "status"
+
+    if action == "join":
+        peer = getattr(args, "peer", None)
+        if not peer:
+            print("[!] Error: Specify peer address to join, e.g. 'llmhub cluster join 192.168.1.15:11434'")
+            return
+        try:
+            res = client.join_cluster(peer)
+            print(f"[+] Cluster Join: {res.get('message', 'Success')}")
+        except Exception as e:
+            print(f"[!] Failed to join cluster via {peer}: {e}")
+        return
+
+    elif action == "ping":
+        target = getattr(args, "target", None)
+        if not target:
+            print("[!] Error: Specify target node address to ping, e.g. 'llmhub cluster ping 192.168.1.15:11434'")
+            return
+        if not target.startswith("http://") and not target.startswith("https://"):
+            target = f"http://{target}"
+        try:
+            import httpx
+            start_t = time.perf_counter()
+            with httpx.Client(timeout=4.0) as http_c:
+                resp = http_c.get(f"{target.rstrip('/')}/healthz")
+            rtt_ms = (time.perf_counter() - start_t) * 1000.0
+            if resp.status_code == 200:
+                hz = resp.json()
+                print(f"[+] Ping {target}: SUCCESS ({rtt_ms:.1f} ms)")
+                print(f"    Status:   {hz.get('status')}")
+                print(f"    Uptime:   {hz.get('uptime_seconds', 0.0):.1f}s")
+                print(f"    Resident: {len(hz.get('resident_models', []))} models")
+            else:
+                print(f"[!] Ping {target}: HTTP {resp.status_code}")
+        except Exception as e:
+            print(f"[!] Ping {target} FAILED: {e}")
+        return
+
+    elif action == "plan":
+        model = getattr(args, "model", None)
+        if not model:
+            print("[!] Error: Specify model tag for pipeline plan, e.g. 'llmhub cluster plan llama3:70b'")
+            return
+        try:
+            plan = client.get_cluster_pipeline_plan(
+                model=model,
+                total_layers=getattr(args, "layers", 32),
+                hidden_dim=getattr(args, "hidden_dim", 4096),
+            )
+            print("=" * 80)
+            print(f" LLMHUB DISTRIBUTED PIPELINE PARALLEL PLAN: {model}")
+            print("=" * 80)
+            print(f" Feasible:              {'YES' if plan.get('is_feasible') else 'NO'}")
+            print(f" Total Layers:          {plan.get('total_layers')}")
+            print(f" Hidden Dimension:      {plan.get('hidden_dim')}")
+            print(f" Transfer Bytes/Step:   {plan.get('activation_bytes_per_token', 0) / 1024.0:.1f} KB")
+            print(f" Est. Network Latency:  {plan.get('estimated_transfer_ms_per_step', 0.0):.2f} ms / step")
+            print(f" Analysis:              {plan.get('feasibility_notes')}")
+            print("-" * 80)
+            stages = plan.get("stages", [])
+            if stages:
+                print(f" {'Stage':<6} | {'Node':<18} | {'Layers':<12} | {'Est RAM':<10} | {'Roles'}")
+                print("-" * 80)
+                for s in stages:
+                    roles = []
+                    if s.get("has_embeddings"): roles.append("Embeddings")
+                    if s.get("has_lm_head"): roles.append("LM Head")
+                    roles_str = ", ".join(roles) if roles else "Hidden Layers"
+                    lyr_str = f"{s.get('layer_start')}-{s.get('layer_end')-1} ({s.get('layer_count')})"
+                    print(f" {s.get('stage_id'):<6} | {s.get('node_name')[:18]:<18} | {lyr_str:<12} | {s.get('estimated_memory_mb', 0):.0f} MB{'':<4} | {roles_str}")
+            print("=" * 80 + "\n")
+        except Exception as e:
+            print(f"[!] Failed to compute cluster pipeline plan: {e}")
+        return
+
+    # Default action: status
+    try:
+        st = client.get_cluster_status()
+    except Exception as e:
+        print(f"[!] Error querying cluster status: {e}")
+        print("    Ensure LLMHub daemon is running with cluster enabled in config.toml.")
+        return
+
+    print("=" * 85)
+    print(" LLMHUB DISTRIBUTED CLUSTER TOPOLOGY & CAPACITIES")
+    print("=" * 85)
+    print(f" Cluster Enabled:    {'YES' if st.get('cluster_enabled') else 'NO'}")
+    print(f" Local Node ID:      {st.get('local_node_id')}")
+    print(f" Nodes (Healthy/Tot):{st.get('healthy_nodes_count')} / {st.get('total_nodes')}")
+    print(f" Total Cluster RAM:  {st.get('total_cluster_ram_mb', 0.0):.1f} MB (Free: {st.get('free_cluster_ram_mb', 0.0):.1f} MB)")
+    print("-" * 85)
+
+    nodes = st.get("nodes", [])
+    if nodes:
+        print(f" {'Node ID':<16} | {'Address':<22} | {'Status':<11} | {'Free RAM':<10} | {'Act':<4} | {'Resident Models'}")
+        print("-" * 85)
+        for n in nodes:
+            nid = n.get("node_id", "")[:16]
+            addr = f"{n.get('host')}:{n.get('port')}"
+            status = n.get("status", "").upper()
+            free_ram = f"{n.get('free_ram_mb', 0.0):.0f} MB"
+            acts = n.get("active_sessions", 0)
+            res_models = list(n.get("resident_models", {}).keys())
+            res_str = ", ".join(res_models) if res_models else "(none)"
+            print(f" {nid:<16} | {addr:<22} | {status:<11} | {free_ram:<10} | {acts:<4} | {res_str}")
+    else:
+        print(" (No cluster nodes detected)")
+
+    res_cluster = st.get("resident_models", {})
+    if res_cluster:
+        print("-" * 85)
+        print(" Cluster Distributed Models:")
+        for tag, m_info in res_cluster.items():
+            nodes_str = ", ".join(m_info.get("resident_nodes", []))
+            print(f"   * {tag:<25} -> Hosted on: {nodes_str} (Active sessions: {m_info.get('total_active_sessions', 0)})")
+    print("=" * 85 + "\n")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmhub",
         description="LLMHub: Offline-First High-Performance GGUF Model Runtime Platform"
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    # cluster
+    p_cluster = subparsers.add_parser("cluster", help="Manage distributed cluster nodes, status, and pipeline sharding")
+    cl_subparsers = p_cluster.add_subparsers(dest="cluster_action", required=False)
+
+    p_cl_status = cl_subparsers.add_parser("status", help="Show cluster nodes, health, and memory capacities")
+    p_cl_status.add_argument("--api-key", default=None, help="Optional API key for authenticated endpoints")
+
+    p_cl_join = cl_subparsers.add_parser("join", help="Join an existing cluster peer node")
+    p_cl_join.add_argument("peer", help="Peer node host:port (e.g. 192.168.1.15:11434)")
+    p_cl_join.add_argument("--api-key", default=None, help="Optional API key")
+
+    p_cl_ping = cl_subparsers.add_parser("ping", help="Ping a cluster peer node and measure RTT latency")
+    p_cl_ping.add_argument("target", help="Peer host:port or URL")
+
+    p_cl_plan = cl_subparsers.add_parser("plan", help="Compute pipeline layer partition plan across active cluster nodes")
+    p_cl_plan.add_argument("model", help="Model specification (e.g. Llama-3-70B)")
+    p_cl_plan.add_argument("--layers", type=int, default=32, help="Total transformer layers")
+    p_cl_plan.add_argument("--hidden-dim", type=int, default=4096, help="Hidden dimension size")
+    p_cl_plan.add_argument("--api-key", default=None, help="Optional API key")
+    p_cluster.set_defaults(func=cmd_cluster)
 
     # status
     p_status = subparsers.add_parser("status", help="Inspect server daemon process, health, and observability metrics")

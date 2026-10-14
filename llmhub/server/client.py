@@ -193,3 +193,51 @@ class LLMHubClient:
                                 }
                         except json.JSONDecodeError:
                             continue
+
+    def get_cluster_status(self) -> Dict[str, Any]:
+        """Fetch cluster status, connected nodes, and resident models."""
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
+            resp = client.get(f"{self.base_url}/api/cluster/status")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to fetch cluster status: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
+    def get_cluster_nodes(self) -> List[Dict[str, Any]]:
+        """Fetch list of active cluster nodes."""
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
+            resp = client.get(f"{self.base_url}/api/cluster/nodes")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to fetch cluster nodes: HTTP {resp.status_code} - {resp.text}")
+            return resp.json().get("nodes", [])
+
+    def join_cluster(self, peer_url: str) -> Dict[str, Any]:
+        """Join an existing cluster by connecting to a peer node."""
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout + 2.0, headers=self._get_headers()) as client:
+            resp = client.post(f"{self.base_url}/api/cluster/join", json={"peer_url": peer_url})
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to join cluster via {peer_url}: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
+    def get_cluster_pipeline_plan(
+        self,
+        model: str,
+        total_layers: int = 32,
+        hidden_dim: int = 4096,
+        weights_mb: float = 4000.0,
+    ) -> Dict[str, Any]:
+        """Calculate distributed pipeline layer partitioning across cluster nodes."""
+        self.check_connection()
+        payload = {
+            "model": model,
+            "total_layers": total_layers,
+            "hidden_dim": hidden_dim,
+            "weights_mb": weights_mb,
+        }
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
+            resp = client.post(f"{self.base_url}/api/cluster/plan", json=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to compute pipeline plan: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()

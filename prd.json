@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-9-observability-hardening",
+  "branchName": "phase-10-distributed-scaleout",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -670,6 +670,111 @@
         "Unit and integration tests for PID management, crash recovery, and request draining",
         "Unit tests for API key auth, Token Bucket rate limiting, and input sanitization",
         "Benchmark measuring /metrics response time and middleware latency overhead"
+      ]
+    },
+    {
+      "id": "US-053",
+      "title": "Cluster Node Membership, State Machine & Manifest Exchange",
+      "phase": 10,
+      "description": "Maintain NodeInfo dataclass, lifecycle state machine (HEALTHY, DEGRADED, UNREACHABLE, OFFLINE), dynamic load scoring, and distributed model residency tracking.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "NodeInfo serialization and deserialization with role, status, RAM, and resident model metadata",
+        "Dynamic load score computation accounting for active sessions, free RAM, network latency, and model residency",
+        "Health state transitions based on heartbeat timestamps"
+      ]
+    },
+    {
+      "id": "US-054",
+      "title": "Zero-Cloud LAN UDP Discovery Beacon",
+      "phase": 10,
+      "description": "Implement zero-configuration LAN peer discovery via periodic UDP broadcast beacons on port 11435 with cluster secret authentication and self-packet filtering.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "DiscoveryBeacon UDP broadcast sender with dynamic RAM and model residency payloads",
+        "Asynchronous UDP receiver listening on 0.0.0.0:11435 with SO_BROADCAST and SO_REUSEADDR",
+        "Self-announcement filtering and cluster secret verification",
+        "Safe error handling on restricted mobile sandbox environments"
+      ]
+    },
+    {
+      "id": "US-055",
+      "title": "Locality-Aware Distributed Request Router",
+      "phase": 10,
+      "description": "Route incoming inference requests intelligently: local resident execution first, remote resident peer with lowest load score second, and cold model capacity-balanced dispatch third.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Local resident preference when model is already in RAM on local node",
+        "Remote resident discovery and load-balanced routing across healthy peers",
+        "Cold model dispatch favoring nodes with greatest available free RAM headroom",
+        "Low-latency streaming proxy forwarding SSE chunks to client"
+      ]
+    },
+    {
+      "id": "US-056",
+      "title": "HTTP Peer Heartbeat & Health Monitoring Protocol",
+      "phase": 10,
+      "description": "Coordinate node heartbeats via POST /api/cluster/heartbeat, maintain peer freshness, and automatically transition unresponsive nodes to UNREACHABLE.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Periodic HTTP heartbeats exchanging dynamic node metrics and resident model tags",
+        "Stale peer detection transitioning nodes to UNREACHABLE after node_timeout_s",
+        "Dead peer reaper removing unresponsive nodes after dead_timeout_s",
+        "Aggregated cluster status reporting total nodes, healthy nodes, total RAM, and model mapping"
+      ]
+    },
+    {
+      "id": "US-057",
+      "title": "Edge Model Pipeline Partitioning & Bandwidth Coordinator",
+      "phase": 10,
+      "description": "Calculate proportional transformer layer partitioning across heterogeneous edge nodes (e.g. PC + Phone) and compute network activation transfer overhead.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "PipelineCoordinator solves proportional layer allocation based on each node's free RAM",
+        "Assigns embedding weights to Stage 0 and LM Head to Stage N-1",
+        "Computes activation tensor transfer payload size per token (hidden_dim * element_size)",
+        "Calculates expected network transfer latency per step across local LAN bandwidth"
+      ]
+    },
+    {
+      "id": "US-058",
+      "title": "Cluster FastAPI Management Endpoints & Streaming Proxy",
+      "phase": 10,
+      "description": "Expose /api/cluster/status, /api/cluster/nodes, /api/cluster/heartbeat, /api/cluster/join, and /api/cluster/plan endpoints on FastAPI server.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "GET /api/cluster/status returns cluster health, total RAM, and resident models",
+        "GET /api/cluster/nodes returns list of all connected cluster members",
+        "POST /api/cluster/heartbeat receives peer updates and replies with local state",
+        "POST /api/cluster/join connects to peer and exchanges known node tables",
+        "Seamless integration with /v1/chat/completions forwarding non-local requests"
+      ]
+    },
+    {
+      "id": "US-059",
+      "title": "Cluster CLI Management (status, join, ping, plan)",
+      "phase": 10,
+      "description": "Provide 'llmhub cluster status', 'llmhub cluster join', 'llmhub cluster ping', and 'llmhub cluster plan' CLI commands.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "llmhub cluster status outputs tabular view of all cluster nodes, RAM, and hosted models",
+        "llmhub cluster join <peer_addr> dynamically joins cluster via peer node",
+        "llmhub cluster ping <target> measures roundtrip latency and inspects remote health",
+        "llmhub cluster plan <model> computes and displays distributed pipeline partition"
+      ]
+    },
+    {
+      "id": "US-060",
+      "title": "Distributed Scale-Out Test Suite & Benchmarks",
+      "phase": 10,
+      "description": "Deliver comprehensive unit and integration tests for discovery, routing, heartbeats, sharding, and endpoints along with micro-benchmarks.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "17 comprehensive tests in test_cluster_distributed.py covering all cluster components",
+        "Benchmark route resolution latency (< 10 us)",
+        "Benchmark beacon packet serialization (< 10 us)",
+        "Benchmark pipeline sharding plan evaluation (< 50 us)",
+        "100% test pass rate across all 160 tests in test suite"
       ]
     }
   ]

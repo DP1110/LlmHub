@@ -106,6 +106,19 @@ class LLMHubConfig:
             },
             "lifecycle": {
                 "drain_timeout_s": 30.0,
+            },
+            "cluster": {
+                "enabled": False,
+                "node_id": "",
+                "node_name": "",
+                "cluster_secret": "",
+                "beacon_enabled": True,
+                "beacon_port": 11435,
+                "heartbeat_interval_s": 2.0,
+                "node_timeout_s": 6.0,
+                "dead_timeout_s": 30.0,
+                "peers": [],
+                "auto_route": True,
             }
         }
 
@@ -191,7 +204,7 @@ def validate_config_schema(settings: Dict[str, Any]) -> List[str]:
     errors: List[str] = []
     known_sections = {
         "server", "runtime", "scheduler", "batch", "storage",
-        "termux", "observability", "security", "lifecycle"
+        "termux", "observability", "security", "lifecycle", "cluster"
     }
 
     for section in settings.keys():
@@ -263,6 +276,24 @@ def validate_config_schema(settings: Dict[str, Any]) -> List[str]:
     if warn_t is not None and crit_t is not None and isinstance(warn_t, (int, float)) and isinstance(crit_t, (int, float)):
         if crit_t <= warn_t:
             errors.append(f"termux.thermal_critical_temp_c ({crit_t}) must be greater than thermal_warning_temp_c ({warn_t})")
+
+    # 6. Cluster section
+    cluster = settings.get("cluster", {})
+    if "beacon_port" in cluster:
+        bp = cluster["beacon_port"]
+        if not isinstance(bp, int) or bp < 1 or bp > 65535:
+            errors.append(f"cluster.beacon_port must be an integer between 1 and 65535 (got {bp!r})")
+    hb_s = cluster.get("heartbeat_interval_s")
+    to_s = cluster.get("node_timeout_s")
+    if hb_s is not None and (not isinstance(hb_s, (int, float)) or hb_s <= 0):
+        errors.append(f"cluster.heartbeat_interval_s must be a positive number (got {hb_s!r})")
+    if to_s is not None and (not isinstance(to_s, (int, float)) or to_s <= 0):
+        errors.append(f"cluster.node_timeout_s must be a positive number (got {to_s!r})")
+    if hb_s is not None and to_s is not None and isinstance(hb_s, (int, float)) and isinstance(to_s, (int, float)):
+        if to_s <= hb_s:
+            errors.append(f"cluster.node_timeout_s ({to_s}) must be greater than heartbeat_interval_s ({hb_s})")
+    if "peers" in cluster and not isinstance(cluster["peers"], list):
+        errors.append(f"cluster.peers must be a list of host:port strings (got {cluster['peers']!r})")
 
     return errors
 

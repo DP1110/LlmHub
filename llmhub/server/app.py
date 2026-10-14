@@ -46,6 +46,10 @@ from llmhub.server.model_manager import (
     ModelManager,
 )
 from llmhub.termux.controller import TermuxController
+from llmhub.cluster.node import NodeInfo, NodeRole, NodeStatus
+from llmhub.cluster.manager import ClusterManager
+from llmhub.cluster.router import ClusterRouter, RoutingDecision
+from llmhub.cluster.pipeline import PipelineCoordinator, PipelinePlan
 
 logger = get_logger("server")
 START_TIME = time.time()
@@ -150,6 +154,57 @@ class ServerState:
 
         self.metrics.register_collector(_collect_live_metrics)
 
+        # Phase 10: Cluster & Distributed Scale-Out components
+        cl_cfg = self.config.settings.get("cluster", {})
+        srv_cfg = self.config.settings.get("server", {})
+        local_node_id = cl_cfg.get("node_id") or f"node-{uuid.uuid4().hex[:8]}"
+        local_node_name = cl_cfg.get("node_name") or f"node-{local_node_id[-4:]}"
+        self.local_node = NodeInfo(
+            node_id=local_node_id,
+            name=local_node_name,
+            host=srv_cfg.get("host", "127.0.0.1"),
+            port=srv_cfg.get("port", 11434),
+            api_url=f"http://{srv_cfg.get('host', '127.0.0.1')}:{srv_cfg.get('port', 11434)}",
+            is_termux=is_termux(),
+            cluster_secret=cl_cfg.get("cluster_secret") or None,
+        )
+        self.cluster_manager = ClusterManager(
+            local_node=self.local_node,
+            enabled=cl_cfg.get("enabled", False),
+            static_peers=cl_cfg.get("peers", []),
+            heartbeat_interval_s=float(cl_cfg.get("heartbeat_interval_s", 2.0)),
+            node_timeout_s=float(cl_cfg.get("node_timeout_s", 6.0)),
+            dead_timeout_s=float(cl_cfg.get("dead_timeout_s", 30.0)),
+            beacon_enabled=cl_cfg.get("beacon_enabled", True),
+            beacon_port=int(cl_cfg.get("beacon_port", 11435)),
+            cluster_secret=cl_cfg.get("cluster_secret") or None,
+        )
+        self.cluster_router = ClusterRouter(self.cluster_manager)
+
+        def _get_cluster_node_state() -> Dict[str, Any]:
+            loaded = self.model_manager.loaded_models
+            free_mb = 0.0
+            tot_mb = 0.0
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                free_mb = vm.available / (1024 * 1024)
+                tot_mb = vm.total / (1024 * 1024)
+            except Exception:
+                pass
+            return {
+                "free_ram_mb": round(free_mb, 1),
+                "total_ram_mb": round(tot_mb, 1),
+                "active_sessions": sum(m.active_sessions for m in loaded.values()),
+                "resident_models": {
+                    tag: {"memory_bytes": m.total_memory_bytes, "active_sessions": m.active_sessions}
+                    for tag, m in loaded.items()
+                },
+                "is_termux": is_termux(),
+            }
+
+        self.cluster_manager.set_state_provider(_get_cluster_node_state)
+
 
 state = ServerState()
 
@@ -172,7 +227,7 @@ def create_app() -> FastAPI:
             state.pid_manager.acquire(
                 host=srv_cfg.get("host", "127.0.0.1"),
                 port=srv_cfg.get("port", 11434),
-                version="0.9.0",
+                version="1.0.0",
             )
         except Exception as e:
             logger.warning("PID acquisition issue: %s", e)
@@ -181,6 +236,7 @@ def create_app() -> FastAPI:
         state.model_manager.start_reaper()
         state.scheduler.start()
         await state.termux_controller.start()
+        await state.cluster_manager.start()
 
         yield
 
@@ -188,6 +244,8 @@ def create_app() -> FastAPI:
         drain_timeout = float(state.config.settings.get("lifecycle", {}).get("drain_timeout_s", 30.0))
         try:
             await state.model_manager.drain_all(timeout=drain_timeout)
+            await state.cluster_manager.stop()
+            await state.cluster_router.aclose()
             await state.termux_controller.stop()
             state.scheduler.stop()
             state.model_manager.stop_reaper()
@@ -537,6 +595,59 @@ def create_app() -> FastAPI:
             )
         return {"status": "unpinned", "model": model_spec}
 
+    # Phase 10: Cluster & Distributed Scale-Out Endpoints
+    @app.get("/api/cluster/status")
+    async def get_cluster_status() -> Dict[str, Any]:
+        """Aggregate health, capacity, and model distribution across all cluster nodes."""
+        return state.cluster_manager.get_cluster_status()
+
+    @app.get("/api/cluster/nodes")
+    async def get_cluster_nodes() -> Dict[str, Any]:
+        """Return list of known cluster nodes and their live capabilities."""
+        st = state.cluster_manager.get_cluster_status()
+        return {"nodes": st.get("nodes", [])}
+
+    @app.post("/api/cluster/heartbeat")
+    async def post_cluster_heartbeat(data: Dict[str, Any], request: Request) -> Dict[str, Any]:
+        """Receive peer heartbeat update and reply with local node status."""
+        sec = state.cluster_manager.cluster_secret
+        if sec:
+            import secrets
+            req_sec = request.headers.get("X-Cluster-Secret") or data.get("secret") or ""
+            if not secrets.compare_digest(req_sec, sec):
+                raise HTTPException(status_code=403, detail="Invalid cluster secret")
+        return await state.cluster_manager.handle_heartbeat_received(data)
+
+    @app.post("/api/cluster/join")
+    async def post_cluster_join(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Connect to an existing cluster peer node and synchronize cluster state."""
+        peer_url = payload.get("peer_url")
+        if not peer_url:
+            raise HTTPException(status_code=400, detail="Missing peer_url")
+        ok, msg = await state.cluster_manager.join_peer(peer_url)
+        if not ok:
+            raise HTTPException(status_code=502, detail=msg)
+        return {"status": "joined", "message": msg, "cluster": state.cluster_manager.get_cluster_status()}
+
+    @app.post("/api/cluster/plan")
+    async def post_cluster_plan(payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute optimal pipeline layer partition plan across active cluster nodes."""
+        model_tag = payload.get("model")
+        if not model_tag:
+            raise HTTPException(status_code=400, detail="Missing model tag")
+        total_layers = int(payload.get("total_layers", 32))
+        hidden_dim = int(payload.get("hidden_dim", 4096))
+        weights_mb = float(payload.get("weights_mb", 4000.0))
+        all_nodes = [state.cluster_manager.local_node] + list(state.cluster_manager.peers.values())
+        plan = PipelineCoordinator.plan_pipeline(
+            model_tag=model_tag,
+            total_layers=total_layers,
+            hidden_dim=hidden_dim,
+            total_weights_mb=weights_mb,
+            nodes=all_nodes,
+        )
+        return plan.to_dict()
+
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
         req_start_t = time.perf_counter()
@@ -546,6 +657,40 @@ def create_app() -> FastAPI:
             sanitized_messages = InputSanitizer.validate_chat_messages(req.messages)
         except ValidationError as e:
             raise HTTPException(status_code=400, detail=str(e))
+
+        # 1b. Locality-Aware Distributed Cluster Routing Check
+        if state.cluster_manager.enabled and state.config.settings.get("cluster", {}).get("auto_route", True):
+            routing_dec = state.cluster_router.route_model(req.model)
+            if not routing_dec.is_local:
+                logger.info(
+                    "Forwarding inference request for model '%s' to cluster node %s (%s) [reason=%s]",
+                    req.model, routing_dec.target, routing_dec.target_url, routing_dec.reason,
+                )
+                raw_payload = req.dict()
+                if req.stream:
+                    return await state.cluster_router.forward_chat_completion_stream(
+                        routing_dec.target_url, raw_payload, request, dict(request.headers)
+                    )
+                else:
+                    fwd_resp = await state.cluster_router.forward_chat_completion_json(
+                        routing_dec.target_url, raw_payload, dict(request.headers)
+                    )
+                    # Deduct tokens from rate limiter if successful JSON response
+                    if fwd_resp.status_code == 200:
+                        try:
+                            body_data = json.loads(fwd_resp.body.decode("utf-8"))
+                            usage = body_data.get("usage", {})
+                            c_toks = usage.get("completion_tokens", 0)
+                            p_toks = usage.get("prompt_tokens", 0)
+                            tot = p_toks + c_toks
+                            state.metrics.tokens_generated_total.inc(c_toks, labels={"model": req.model})
+                            state.metrics.prompt_tokens_total.inc(p_toks, labels={"model": req.model})
+                            cid = getattr(request.state, "client_id", None)
+                            if cid and tot > 1:
+                                state.rate_limiter.consume_tokens(cid, tot - 1)
+                        except Exception:
+                            pass
+                    return fwd_resp
 
         # 2. Model retrieval / loading with draining check
         try:

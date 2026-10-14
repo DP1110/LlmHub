@@ -489,6 +489,9 @@ def run_benchmarks() -> None:
     # Phase 9 Observability & Hardening
     benchmark_observability_hardening()
 
+    # Phase 10 Distributed Scale-Out & Cluster Routing
+    benchmark_cluster_scaleout()
+
 def benchmark_termux_low_memory() -> None:
     from llmhub.termux.thermal import ThermalMonitor
     from llmhub.termux.memory_pressure import MemoryPressureMonitor
@@ -615,6 +618,64 @@ def benchmark_observability_hardening() -> None:
         _ = fmt.format(rec)
     json_us = ((time.perf_counter() - start) / n_json) * 1_000_000.0
     print(f" Structured JSON Log Formatting Overhead: {json_us:.3f} us / log record")
+    print("=" * 80)
+
+def benchmark_cluster_scaleout() -> None:
+    from llmhub.cluster.node import NodeInfo, NodeStatus
+    from llmhub.cluster.manager import ClusterManager
+    from llmhub.cluster.router import ClusterRouter
+    from llmhub.cluster.beacon import DiscoveryBeacon
+    from llmhub.cluster.pipeline import PipelineCoordinator
+
+    print("\n" + "=" * 80)
+    print(" PHASE 10 DISTRIBUTED SCALE-OUT & CLUSTER ROUTING BENCHMARK")
+    print("=" * 80)
+
+    # 1. ClusterRouter route resolution latency
+    local = NodeInfo(node_id="node-local", free_ram_mb=4000.0, resident_models={"qwen:0.5b": {}})
+    mgr = ClusterManager(local_node=local, enabled=True)
+    for i in range(5):
+        mgr.peers[f"peer_{i}"] = NodeInfo(
+            node_id=f"peer_{i}",
+            free_ram_mb=8000.0 + i * 1000,
+            resident_models={f"model_{i}": {}},
+            latency_ms=2.0 + i,
+        )
+    router = ClusterRouter(mgr)
+
+    n_routes = 10000
+    start = time.perf_counter()
+    for _ in range(n_routes):
+        router.route_model("model_2")
+    route_us = ((time.perf_counter() - start) / n_routes) * 1_000_000.0
+    print(f" Cluster Route Resolution Latency:       {route_us:.3f} us / routing decision")
+
+    # 2. Discovery beacon packet serialization latency
+    beacon = DiscoveryBeacon(node_id="node-bench", name="bench-worker", api_url="http://192.168.1.50:11434")
+    beacon.set_dynamic_state_callback(lambda: {"free_ram_mb": 5500.0, "resident_models": {"test": {}}})
+    n_beacon = 10000
+    start = time.perf_counter()
+    for _ in range(n_beacon):
+        beacon.build_packet()
+    beacon_us = ((time.perf_counter() - start) / n_beacon) * 1_000_000.0
+    print(f" Discovery Beacon Packet Serialization:  {beacon_us:.3f} us / packet")
+
+    # 3. Pipeline layer partition calculation latency
+    nodes = [local] + list(mgr.peers.values())
+    n_plan = 5000
+    start = time.perf_counter()
+    for _ in range(n_plan):
+        PipelineCoordinator.plan_pipeline("llama3:70b", 80, 8192, 40000.0, nodes)
+    plan_us = ((time.perf_counter() - start) / n_plan) * 1_000_000.0
+    print(f" Pipeline Layer Sharding Plan Latency:   {plan_us:.3f} us / evaluation")
+
+    # 4. Cluster status aggregation latency
+    n_status = 5000
+    start = time.perf_counter()
+    for _ in range(n_status):
+        mgr.get_cluster_status()
+    status_us = ((time.perf_counter() - start) / n_status) * 1_000_000.0
+    print(f" Cluster Status Aggregation Overhead:    {status_us:.3f} us / query")
     print("=" * 80)
 
 if __name__ == "__main__":

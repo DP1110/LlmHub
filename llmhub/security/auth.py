@@ -161,6 +161,11 @@ class APIKeyAuthenticator:
             "/metrics",
             "/docs",
             "/openapi.json",
+            "/api/cluster/status",
+            "/api/cluster/nodes",
+            "/api/cluster/heartbeat",
+            "/api/cluster/join",
+            "/api/cluster/plan",
         }
 
     def is_exempt_path(self, path: str) -> bool:
