@@ -88,6 +88,13 @@ class SchedSession:
     prompt_tokens: Optional[List[int]] = None
     slot_id: Optional[int] = None
     admitted: bool = False
+    tenant_id: str = "default"
+    slo_target_ttft_ms: Optional[float] = None
+    slo_target_tbt_ms: Optional[float] = None
+    strict_slo: bool = False
+    mlfq_level: int = 0
+    use_speculative: bool = False
+    draft_model_tag: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.weight = max(0.01, float(self.weight))

@@ -6,13 +6,18 @@ import logging
 import time
 from typing import Any, Deque, Dict, List, Optional, Set
 
+from llmhub.scheduler.fair_share import TenantFairShareManager
+from llmhub.scheduler.mlfq import MultilevelFeedbackQueue
 from llmhub.scheduler.policy import (
     DeficitRoundRobinPolicy,
     ThreadingMode,
     ThreadingStrategy,
 )
 from llmhub.scheduler.session import SchedSession, SessionPhase
+from llmhub.scheduler.slo import SLOAdmissionController, SLOTarget, SLOViolationError
+from llmhub.server.backend import DecodeResult
 from llmhub.server.model_manager import LoadedModel, ModelManager
+from llmhub.speculative.engine import SpeculativeEngine
 
 logger = logging.getLogger(__name__)
 
@@ -35,14 +40,25 @@ class TokenRoundRobinScheduler:
         max_queue_depth: int = 128,
         threading_mode: ThreadingMode = ThreadingMode.HYBRID,
         enable_continuous_batching: bool = True,
+        enable_mlfq: bool = True,
+        enable_slo: bool = True,
+        enable_fair_share: bool = True,
     ):
         self.model_manager = model_manager
         self.default_quantum = default_quantum
         self.default_chunk_size = default_chunk_size
         self.max_queue_depth = max_queue_depth
         self.enable_continuous_batching = enable_continuous_batching
+        self.enable_mlfq = enable_mlfq
+        self.enable_slo = enable_slo
+        self.enable_fair_share = enable_fair_share
+
         self.threading_strategy = ThreadingStrategy(mode=threading_mode)
         self.policy = DeficitRoundRobinPolicy(default_quantum=default_quantum)
+        self.mlfq = MultilevelFeedbackQueue(boost_interval_seconds=10.0, enable_mlfq=enable_mlfq)
+        self.slo_controller = SLOAdmissionController(default_target_ttft_ms=2000.0, default_target_tbt_ms=50.0)
+        self.fair_share = TenantFairShareManager()
+        self.speculative_engines: Dict[str, SpeculativeEngine] = {}
 
         self.runnable_queue: List[SchedSession] = []
         self.completed_sessions: Deque[SchedSession] = deque(maxlen=500)
@@ -55,6 +71,20 @@ class TokenRoundRobinScheduler:
         self.total_context_switches: int = 0
         self.total_quanta_executed: int = 0
         self.total_tokens_generated: int = 0
+
+    def _emit_terminal_packet(self, session: SchedSession, packet: Dict[str, Any]) -> None:
+        """Safely deliver terminal packet to session queue without blocking scheduler loop."""
+        try:
+            session.token_queue.put_nowait(packet)
+        except asyncio.QueueFull:
+            try:
+                session.token_queue.get_nowait()
+            except Exception:
+                pass
+            try:
+                session.token_queue.put_nowait(packet)
+            except Exception:
+                pass
 
     async def _cleanup_session_resources(self, session: SchedSession) -> None:
         """Safely release backend session KV cache, decrement active session counters, and prune queue."""
@@ -73,7 +103,31 @@ class TokenRoundRobinScheduler:
                 session.admitted = False
             session.slot_id = None
 
+        if session.use_speculative and session.draft_model_tag:
+            draft_loaded = self.model_manager.get_model(session.draft_model_tag)
+            if draft_loaded:
+                draft_loaded.active_sessions = max(0, draft_loaded.active_sessions - 1)
+                async with draft_loaded.inference_lock:
+                    try:
+                        await asyncio.to_thread(draft_loaded.backend.close_session, session.session_id)
+                    except Exception:
+                        pass
+
+        if self.enable_slo:
+            target = None
+            if session.slo_target_ttft_ms is not None or session.slo_target_tbt_ms is not None:
+                target = SLOTarget(
+                    target_ttft_ms=session.slo_target_ttft_ms or self.slo_controller.default_target_ttft_ms,
+                    target_tbt_ms=session.slo_target_tbt_ms or self.slo_controller.default_target_tbt_ms,
+                    strict_enforcement=session.strict_slo,
+                )
+            self.slo_controller.record_session_completion(session, target=target)
+
         async with self.lock:
+            if self.enable_mlfq:
+                self.mlfq.remove_session(session)
+            if self.enable_fair_share:
+                self.fair_share.register_session_completion(session)
             if session in self.runnable_queue:
                 self.runnable_queue.remove(session)
             if session not in self.completed_sessions:
@@ -183,6 +237,12 @@ class TokenRoundRobinScheduler:
                 self.total_quanta_executed += 1
                 self.total_tokens_generated += len(deltas)
 
+                if self.enable_mlfq:
+                    self.mlfq.record_quantum_consumption(s, len(deltas))
+                    s.mlfq_level = self.mlfq.session_levels.get(sid, 0)
+                if self.enable_fair_share:
+                    self.fair_share.record_execution(s.tenant_id, len(deltas))
+
                 for delta in deltas:
                     s.generated_text += delta
                     try:
@@ -258,12 +318,13 @@ class TokenRoundRobinScheduler:
                 if s in self.runnable_queue and not s.is_done:
                     self.runnable_queue.remove(s)
                     self.runnable_queue.append(s)
+                    if self.enable_mlfq:
+                        self.mlfq.rotate_session_in_level(s)
 
         return True
 
     async def submit_session(self, session: SchedSession) -> None:
-
-        """Submit a new session into the runnable queue with backpressure protection."""
+        """Submit a new session into the runnable queue with backpressure protection and predictive SLO admission."""
         async with self.lock:
             # Backpressure guard
             active_count = len([s for s in self.runnable_queue if not s.is_done])
@@ -272,10 +333,26 @@ class TokenRoundRobinScheduler:
                     f"Scheduler queue is full ({active_count}/{self.max_queue_depth} active sessions). Backpressure applied."
                 )
 
+            # Predictive SLO admission check
+            if self.enable_slo and (session.strict_slo or session.slo_target_ttft_ms is not None):
+                target = SLOTarget(
+                    target_ttft_ms=session.slo_target_ttft_ms or self.slo_controller.default_target_ttft_ms,
+                    target_tbt_ms=session.slo_target_tbt_ms or self.slo_controller.default_target_tbt_ms,
+                    strict_enforcement=session.strict_slo,
+                )
+                self.slo_controller.check_admission(session, self.runnable_queue, slo_target=target)
+
             session.quantum_tokens = session.quantum_tokens or self.default_quantum
             session.chunk_size = session.chunk_size or self.default_chunk_size
             session.metrics.enqueue_time = time.monotonic()
             session.phase = SessionPhase.WAITING
+
+            if self.enable_fair_share:
+                self.fair_share.register_session_admission(session, session.tenant_id)
+
+            if self.enable_mlfq:
+                self.mlfq.enqueue_session(session)
+                session.mlfq_level = self.mlfq.session_levels.get(session.session_id, 0)
 
             self.runnable_queue.append(session)
 
@@ -293,7 +370,7 @@ class TokenRoundRobinScheduler:
 
         if target:
             # Notify any awaiting reader
-            await target.token_queue.put({"done": True, "stop_reason": "cancelled", "error": "Session cancelled by client."})
+            self._emit_terminal_packet(target, {"done": True, "stop_reason": "cancelled", "error": "Session cancelled by client."})
             await self._cleanup_session_resources(target)
             return True
         return False
@@ -319,7 +396,7 @@ class TokenRoundRobinScheduler:
                     expired.append(s)
 
         for s in expired:
-            await s.token_queue.put({"done": True, "stop_reason": "timeout", "error": s.error})
+            self._emit_terminal_packet(s, {"done": True, "stop_reason": "timeout", "error": s.error})
             await self._cleanup_session_resources(s)
 
         async with self.lock:
@@ -332,8 +409,16 @@ class TokenRoundRobinScheduler:
                     loaded.n_threads = threads
                     loaded.backend.set_n_threads(threads)
 
-            # 3. Select next runnable session via Deficit Round-Robin
-            session = self.policy.select_next_session(self.runnable_queue)
+            # 3. Select next runnable session via MLFQ / Fair-Share / Deficit Round-Robin
+            session: Optional[SchedSession] = None
+            if self.enable_mlfq:
+                session = self.mlfq.select_next_runnable()
+            elif self.enable_fair_share:
+                session = self.fair_share.select_next_tenant_session(self.runnable_queue)
+
+            if not session:
+                session = self.policy.select_next_session(self.runnable_queue)
+
             if not session:
                 return False
 
@@ -357,8 +442,14 @@ class TokenRoundRobinScheduler:
                 await self._cleanup_session_resources(session)
                 return True
 
-        # Check if Continuous Batching is enabled and supported for this model
-        if self.enable_continuous_batching and hasattr(loaded_model, "batch_engine") and loaded_model.batch_engine is not None:
+        # Check if Continuous Batching is enabled and supported for this model (skip for speculative requests)
+        is_speculative = session.use_speculative and bool(session.draft_model_tag)
+        if (
+            self.enable_continuous_batching
+            and not is_speculative
+            and hasattr(loaded_model, "batch_engine")
+            and loaded_model.batch_engine is not None
+        ):
             return await self._step_continuous_batch(loaded_model, session)
 
         # Phase 1: Initialize session on backend if in WAITING
@@ -384,7 +475,7 @@ class TokenRoundRobinScheduler:
                 session.phase = SessionPhase.FAILED
                 session.error = str(e)
                 session.metrics.finish_time = time.monotonic()
-                await session.token_queue.put({"done": True, "error": str(e)})
+                self._emit_terminal_packet(session, {"done": True, "error": str(e)})
                 await self._cleanup_session_resources(session)
                 return True
 
@@ -393,6 +484,8 @@ class TokenRoundRobinScheduler:
                 if session in self.runnable_queue:
                     self.runnable_queue.remove(session)
                     self.runnable_queue.append(session)
+                if self.enable_mlfq:
+                    self.mlfq.rotate_session_in_level(session)
             return True
 
         # Phase 2: Chunked Prefill (evaluate P tokens at a time)
@@ -409,7 +502,7 @@ class TokenRoundRobinScheduler:
                 session.phase = SessionPhase.FAILED
                 session.error = str(e)
                 session.metrics.finish_time = time.monotonic()
-                await session.token_queue.put({"done": True, "error": str(e)})
+                self._emit_terminal_packet(session, {"done": True, "error": str(e)})
                 await self._cleanup_session_resources(session)
                 return True
 
@@ -419,16 +512,21 @@ class TokenRoundRobinScheduler:
             if is_complete:
                 session.phase = SessionPhase.DECODING
                 # Immediately emit initial acknowledgment so consumers know prefill finished
-                await session.token_queue.put({
-                    "type": "prefill_complete",
-                    "prefilled_tokens": session.metrics.prefill_tokens
-                })
+                try:
+                    session.token_queue.put_nowait({
+                        "type": "prefill_complete",
+                        "prefilled_tokens": session.metrics.prefill_tokens
+                    })
+                except asyncio.QueueFull:
+                    pass
 
             # Preemption point: yield turn and rotate so other sessions interleave during prefill!
             async with self.lock:
                 if session in self.runnable_queue:
                     self.runnable_queue.remove(session)
                     self.runnable_queue.append(session)
+                if self.enable_mlfq:
+                    self.mlfq.rotate_session_in_level(session)
             return True
 
         # Phase 3: Token Quantum Decode (generate Q tokens at a time)
@@ -437,55 +535,153 @@ class TokenRoundRobinScheduler:
             tokens_to_gen = min(session.quantum_tokens, remaining)
 
             t_start = time.perf_counter()
-            try:
-                async with loaded_model.inference_lock:
-                    res = await asyncio.to_thread(
-                        loaded_model.backend.decode_step,
-                        session.session_id,
-                        tokens_to_gen
-                    )
-            except Exception as e:
-                session.phase = SessionPhase.FAILED
-                session.error = str(e)
-                session.metrics.finish_time = time.monotonic()
-                await session.token_queue.put({"done": True, "error": str(e)})
-                await self._cleanup_session_resources(session)
-                return True
+            cpu_duration_ms = 0.0
+            tokens_generated = 0
+            text_deltas: List[str] = []
+            is_done = False
+            stop_reason: Optional[str] = None
 
-            cpu_duration_ms = (time.perf_counter() - t_start) * 1000.0
+            # Check if speculative decoding is requested and draft model is specified
+            draft_model: Optional[LoadedModel] = None
+            if session.use_speculative and session.draft_model_tag:
+                try:
+                    draft_model = await self.model_manager.get_or_load_model(session.draft_model_tag)
+                except Exception as e:
+                    logger.warning("Draft model %s load failed (%s); falling back to target decode", session.draft_model_tag, e)
+                    draft_model = None
+
+            if draft_model is not None:
+                pair_key = f"{session.model_tag}:{session.draft_model_tag}"
+                spec_engine = self.speculative_engines.setdefault(
+                    pair_key,
+                    SpeculativeEngine(session.model_tag, session.draft_model_tag)
+                )
+
+                # Ensure draft session is initialized
+                if not draft_model.backend.get_session(session.session_id):
+                    draft_model.active_sessions += 1
+                    draft_model.last_active_time = time.monotonic()
+                    try:
+                        async with draft_model.inference_lock:
+                            await asyncio.to_thread(
+                                draft_model.backend.new_session,
+                                session_id=session.session_id,
+                                prompt=session.prompt,
+                                max_tokens=session.max_tokens,
+                                temperature=session.temperature,
+                                top_p=session.top_p,
+                                stop=session.stop,
+                            )
+                            # Prefill draft model with cooperative yield
+                            while True:
+                                _, p_done = await asyncio.to_thread(
+                                    draft_model.backend.prefill_chunk,
+                                    session.session_id,
+                                    session.chunk_size
+                                )
+                                if p_done:
+                                    break
+                                await asyncio.sleep(0)
+                    except Exception as e:
+                        logger.warning("Draft model initialization failed (%s); falling back to target decode", e)
+                        draft_model.active_sessions = max(0, draft_model.active_sessions - 1)
+                        draft_model = None
+
+            if draft_model is not None:
+                try:
+                    if loaded_model.tag == draft_model.tag:
+                        async with loaded_model.inference_lock:
+                            spec_res = await asyncio.to_thread(
+                                spec_engine.speculative_step,
+                                session.session_id,
+                                loaded_model.backend,
+                                draft_model.backend,
+                                min(tokens_to_gen, 4)
+                            )
+                    else:
+                        first_m, second_m = sorted([loaded_model, draft_model], key=lambda m: m.tag)
+                        async with first_m.inference_lock:
+                            async with second_m.inference_lock:
+                                spec_res = await asyncio.to_thread(
+                                    spec_engine.speculative_step,
+                                    session.session_id,
+                                    loaded_model.backend,
+                                    draft_model.backend,
+                                    min(tokens_to_gen, 4)
+                                )
+                    cpu_duration_ms = (time.perf_counter() - t_start) * 1000.0
+                    tokens_generated = len(spec_res.emitted_tokens)
+                    text_deltas = spec_res.emitted_text_deltas
+                    is_done = spec_res.done
+                    stop_reason = spec_res.stop_reason
+                    draft_model.last_active_time = time.monotonic()
+                except Exception as e:
+                    logger.warning("Speculative step failed (%s); falling back to regular decode", e)
+                    draft_model = None
+
+            if draft_model is None:
+                try:
+                    async with loaded_model.inference_lock:
+                        res = await asyncio.to_thread(
+                            loaded_model.backend.decode_step,
+                            session.session_id,
+                            tokens_to_gen
+                        )
+                    cpu_duration_ms = (time.perf_counter() - t_start) * 1000.0
+                    tokens_generated = len(res.tokens)
+                    text_deltas = res.text_deltas
+                    is_done = res.done
+                    stop_reason = res.stop_reason
+                except Exception as e:
+                    session.phase = SessionPhase.FAILED
+                    session.error = str(e)
+                    session.metrics.finish_time = time.monotonic()
+                    self._emit_terminal_packet(session, {"done": True, "error": str(e)})
+                    await self._cleanup_session_resources(session)
+                    return True
 
             # Record First-Token Time (TTFT)
             now = time.monotonic()
-            if session.metrics.first_token_time is None and len(res.tokens) > 0:
+            if session.metrics.first_token_time is None and tokens_generated > 0:
                 session.metrics.first_token_time = now
 
             session.metrics.total_cpu_time_ms += cpu_duration_ms
             session.metrics.last_quantum_time = now
-            session.metrics.generated_tokens += len(res.tokens)
+            session.metrics.generated_tokens += tokens_generated
             session.metrics.quanta_executed += 1
             self.total_quanta_executed += 1
-            self.total_tokens_generated += len(res.tokens)
-            session.deficit -= len(res.tokens)
+            self.total_tokens_generated += tokens_generated
+            session.deficit -= tokens_generated
             loaded_model.last_active_time = now
 
-            # Stream generated tokens to consumer queue
-            for delta in res.text_deltas:
+            # MLFQ & Fair-Share tracking
+            if self.enable_mlfq:
+                self.mlfq.record_quantum_consumption(session, tokens_generated)
+                session.mlfq_level = self.mlfq.session_levels.get(session.session_id, 0)
+            if self.enable_fair_share:
+                self.fair_share.record_execution(session.tenant_id, tokens_generated)
+
+            # Stream generated tokens to consumer queue (non-blocking)
+            for delta in text_deltas:
                 session.generated_text += delta
-                await session.token_queue.put({
-                    "delta": delta,
-                    "done": False,
-                    "session_id": session.session_id,
-                })
+                try:
+                    session.token_queue.put_nowait({
+                        "delta": delta,
+                        "done": False,
+                        "session_id": session.session_id,
+                    })
+                except asyncio.QueueFull:
+                    logger.warning("Session %s token_queue is full; client backpressure triggered", session.session_id)
 
             # Check termination condition
             hit_max_tokens = session.metrics.generated_tokens >= session.max_tokens
-            if res.done or hit_max_tokens:
+            if is_done or hit_max_tokens:
                 session.phase = SessionPhase.COMPLETED
-                session.stop_reason = res.stop_reason if not hit_max_tokens else "length"
+                session.stop_reason = stop_reason if not hit_max_tokens else "length"
                 session.metrics.finish_time = now
 
                 # Emit final completion packet with usage statistics
-                await session.token_queue.put({
+                completion_pkt = {
                     "done": True,
                     "stop_reason": session.stop_reason,
                     "text": session.generated_text,
@@ -498,7 +694,8 @@ class TokenRoundRobinScheduler:
                         "quanta": session.metrics.quanta_executed,
                         "context_switches": session.metrics.context_switches,
                     }
-                })
+                }
+                self._emit_terminal_packet(session, completion_pkt)
 
                 # Safely release backend session, decrement active_sessions, and move to completed history
                 await self._cleanup_session_resources(session)
@@ -508,6 +705,8 @@ class TokenRoundRobinScheduler:
                     if session in self.runnable_queue:
                         self.runnable_queue.remove(session)
                         self.runnable_queue.append(session)
+                    if self.enable_mlfq:
+                        self.mlfq.rotate_session_in_level(session)
 
             # Preemption boundary: step finishes here and yields to runnable queue
             return True
@@ -580,4 +779,8 @@ class TokenRoundRobinScheduler:
             "ttft_p50_ms": round(p50_ttft, 2),
             "ttft_p95_ms": round(p95_ttft, 2),
             "completed_sessions_count": len(all_completed),
+            "mlfq": self.mlfq.get_stats() if self.enable_mlfq else None,
+            "slo": self.slo_controller.get_stats() if self.enable_slo else None,
+            "fair_share": self.fair_share.get_stats() if self.enable_fair_share else None,
+            "speculative": {k: eng.get_stats() for k, eng in self.speculative_engines.items()},
         }

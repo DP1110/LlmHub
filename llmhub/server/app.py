@@ -33,6 +33,7 @@ from llmhub.hardware.detector import HardwareDetector
 from llmhub.scheduler.policy import ThreadingMode
 from llmhub.scheduler.scheduler import QueueFullError, TokenRoundRobinScheduler
 from llmhub.scheduler.session import SchedSession, SessionPhase
+from llmhub.scheduler.slo import SLOViolationError
 from llmhub.server.backend import Backend
 from llmhub.server.llamacpp import LlamaCppBackend
 from llmhub.server.model_manager import LoadedModel, MemoryAdmissionError, ModelManager
@@ -53,6 +54,13 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = None
     priority: Optional[int] = 5
     weight: Optional[float] = 1.0
+    tenant_id: Optional[str] = None
+    user: Optional[str] = None
+    slo_target_ttft_ms: Optional[float] = None
+    slo_target_tbt_ms: Optional[float] = None
+    strict_slo: bool = False
+    use_speculative: bool = False
+    draft_model: Optional[str] = None
 
 class ServerState:
     def __init__(self) -> None:
@@ -75,7 +83,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="LLMHub Inference Server",
-        version="0.5.0",
+        version="0.7.0",
         description="Offline-first multi-model GGUF inference platform with token-level round-robin scheduling",
         lifespan=lifespan
     )
@@ -170,6 +178,22 @@ def create_app() -> FastAPI:
     async def get_scheduler_telemetry() -> Dict[str, Any]:
         return state.scheduler.get_telemetry()
 
+    @app.get("/api/scheduler/mlfq")
+    async def get_scheduler_mlfq() -> Dict[str, Any]:
+        return state.scheduler.mlfq.get_stats()
+
+    @app.get("/api/scheduler/slo")
+    async def get_scheduler_slo() -> Dict[str, Any]:
+        return state.scheduler.slo_controller.get_stats()
+
+    @app.get("/api/scheduler/tenants")
+    async def get_scheduler_tenants() -> Dict[str, Any]:
+        return state.scheduler.fair_share.get_stats()
+
+    @app.get("/api/speculative")
+    async def get_speculative_status() -> Dict[str, Any]:
+        return {k: eng.get_stats() for k, eng in state.scheduler.speculative_engines.items()}
+
     @app.post("/api/scheduler/mode")
     async def set_scheduler_mode(mode: str) -> Dict[str, Any]:
         try:
@@ -236,7 +260,7 @@ def create_app() -> FastAPI:
         return {"status": "unpinned", "model": model_spec}
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(req: ChatCompletionRequest) -> Any:
+    async def chat_completions(req: ChatCompletionRequest, request: Request) -> Any:
         try:
             loaded_model = await state.model_manager.get_or_load_model(req.model)
         except MemoryAdmissionError as e:
@@ -250,6 +274,7 @@ def create_app() -> FastAPI:
 
         stop_criteria = [req.stop] if isinstance(req.stop, str) else req.stop
         session_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        tenant_id = req.tenant_id or req.user or request.headers.get("X-Tenant-ID") or "default"
 
         sched_session = SchedSession(
             session_id=session_id,
@@ -261,6 +286,12 @@ def create_app() -> FastAPI:
             stop=stop_criteria,
             priority=req.priority or 5,
             weight=req.weight or 1.0,
+            tenant_id=tenant_id,
+            slo_target_ttft_ms=req.slo_target_ttft_ms,
+            slo_target_tbt_ms=req.slo_target_tbt_ms,
+            strict_slo=req.strict_slo,
+            use_speculative=req.use_speculative,
+            draft_model_tag=req.draft_model,
         )
 
         # Ensure scheduler loop is running on current event loop
@@ -270,6 +301,11 @@ def create_app() -> FastAPI:
             await state.scheduler.submit_session(sched_session)
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e))
+        except SLOViolationError as e:
+            raise HTTPException(
+                status_code=429,
+                detail=f"SLO admission rejected: predicted TTFT ({e.estimated_ttft_ms:.1f}ms) exceeds target ({e.target_ttft_ms:.1f}ms)"
+            )
 
         if req.stream:
             async def event_generator() -> AsyncGenerator[str, None]:

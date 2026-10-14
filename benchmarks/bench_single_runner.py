@@ -370,6 +370,54 @@ def benchmark_continuous_batching_scaling() -> None:
     print(f" Prefill Redundancy Avoided: {cache.tokens_saved / (cache.total_queries * 128) * 100:.1f}% of total input volume")
     print("=" * 80)
 
+def benchmark_advanced_scheduling() -> None:
+    from llmhub.scheduler.mlfq import MultilevelFeedbackQueue
+    from llmhub.scheduler.session import SchedSession
+    from llmhub.speculative.engine import SpeculativeEngine
+
+    print("\n" + "=" * 80)
+    print(" PHASE 7 ADVANCED SCHEDULING: MLFQ OVERHEAD & SPECULATIVE DECODING SPEEDUP")
+    print("=" * 80)
+
+    # 1. MLFQ queue selection and demotion overhead
+    mlfq = MultilevelFeedbackQueue(boost_interval_seconds=10.0, enable_mlfq=True)
+    sessions = [
+        SchedSession(session_id=f"bench_sess_{i}", model_tag="test-model", prompt="test", max_tokens=256)
+        for i in range(100)
+    ]
+    for s in sessions:
+        mlfq.enqueue_session(s)
+
+    n_ops = 5000
+    start = time.perf_counter()
+    for i in range(n_ops):
+        s = mlfq.select_next_runnable()
+        if s:
+            mlfq.record_quantum_consumption(s, 4)
+            mlfq.rotate_session_in_level(s)
+    elapsed = time.perf_counter() - start
+    avg_mlfq_us = (elapsed / n_ops) * 1_000_000.0
+
+    print(f" MLFQ Select + Demotion + Rotate Overhead: {avg_mlfq_us:.3f} us / step (Queue Depth: 100)")
+    print(f" MLFQ Demotions Triggered:                 {mlfq.total_demotions}")
+    print("-" * 80)
+
+    # 2. Speculative decoding mathematical model speedup across acceptance rates alpha
+    print(f"{'Draft K':<9} | {'Acceptance Rate (alpha)':<25} | {'Expected Tok/Round':<20} | {'Theoretical Speedup':<20}")
+    print("-" * 80)
+
+    cost_ratio = 0.15  # Draft 512M vs Target 7B (~6.7x speed difference)
+    for k in [2, 4, 6]:
+        for alpha in [0.30, 0.50, 0.75, 0.90]:
+            # Expected accepted tokens: E[accepted] = sum_{i=1}^K alpha^i
+            expected_accepted = sum(alpha ** i for i in range(1, k + 1))
+            expected_tokens = expected_accepted + 1.0  # +1 target correction/bonus token
+            cost = 1.0 + (k * cost_ratio)
+            speedup = expected_tokens / cost
+            print(f"{k:<9} | {alpha:<25.2f} | {expected_tokens:<20.2f} | {speedup:>18.2f}x")
+
+    print("=" * 80)
+
 def run_benchmarks() -> None:
     prof = HardwareDetector.get_profile()
     cpu = prof.cpu
@@ -431,6 +479,9 @@ def run_benchmarks() -> None:
 
     # Phase 6 Continuous Batching Throughput & Prefix Caching Scaling
     benchmark_continuous_batching_scaling()
+
+    # Phase 7 Advanced Scheduling & Speculative Decoding
+    benchmark_advanced_scheduling()
 
 if __name__ == "__main__":
     run_benchmarks()

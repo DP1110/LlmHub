@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-6-continuous-batching",
+  "branchName": "phase-7-advanced-scheduling",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -409,6 +409,84 @@
         "Tests verifying dynamic joining and leaving in continuous batching",
         "Tests verifying prefix cache hit and token saving",
         "Benchmark measuring throughput scaling vs batch size B=1, 2, 4"
+      ]
+    },
+    {
+      "id": "US-033",
+      "title": "Multilevel Feedback Queue (MLFQ) Priority Scheduler",
+      "phase": 7,
+      "description": "Implement MLFQ with priority queues (Q0 interactive, Q1 medium, Q2 batch), token quantum allotments, demotion on consumption, and starvation-free periodic boosting.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "New sessions arrive at highest priority Q0",
+        "Short interactive requests retain priority without demotion",
+        "Long completions demote to lower priority queues upon consuming queue token budget",
+        "Periodic global priority boost resets all waiting/runnable sessions to Q0 to prevent starvation"
+      ]
+    },
+    {
+      "id": "US-034",
+      "title": "SLO Target Tracking & Predictive Admission Control",
+      "phase": 7,
+      "description": "Define Service Level Objectives (TTFT < 2.0s, TBT < 50ms) and evaluate predictive queue delay before admitting new sessions.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Configurable TTFT and TBT SLO targets per session and model",
+        "Predictive delay calculator based on queue depth, prefill tokens, and model throughput",
+        "Admission control rejects or defers requests with HTTP 429 when SLOs would be violated",
+        "SLO compliance metrics (met vs violated) tracked in real-time"
+      ]
+    },
+    {
+      "id": "US-035",
+      "title": "Multi-Tenant Fair-Share Scheduler (Per-User / Per-Key DRR)",
+      "phase": 7,
+      "description": "Enforce fair-share scheduling across user IDs and API keys to prevent tenant starvation.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Extract tenant identity from Authorization header or X-User-ID",
+        "Hierarchical Deficit Round-Robin balances turns across active tenants",
+        "Per-tenant token usage, active sessions, and rate metrics",
+        "Heavy tenants throttled without starving light tenants"
+      ]
+    },
+    {
+      "id": "US-036",
+      "title": "Speculative Decoding Draft-Target Verification Engine",
+      "phase": 7,
+      "description": "Accelerate inference using a lightweight draft model (e.g. 512M) producing K draft tokens verified in parallel by the target model.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Draft model generates K candidate tokens with minimal memory bandwidth consumption",
+        "Target model verifies draft candidates in a single batched forward pass",
+        "Accept tokens up to divergence point and sample 1 target correction token",
+        "Track acceptance rate alpha and compute speedup factor"
+      ]
+    },
+    {
+      "id": "US-037",
+      "title": "Advanced Scheduling HTTP Telemetry & APIs",
+      "phase": 7,
+      "description": "Expose endpoints /api/scheduler/mlfq, /api/scheduler/slo, and /api/speculative for runtime observability.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Endpoint /api/scheduler/mlfq returns queue distribution across Q0, Q1, Q2",
+        "Endpoint /api/scheduler/slo returns TTFT/TBT compliance and admission stats",
+        "Endpoint /api/speculative returns draft-target pairings and acceptance rate alpha"
+      ]
+    },
+    {
+      "id": "US-038",
+      "title": "Phase 7 Advanced Scheduling Tests & Benchmarks",
+      "phase": 7,
+      "description": "Test suite verifying MLFQ demotion, priority boost, SLO enforcement, fair-share, and speculative decoding speedup benchmark.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Unit tests for MLFQ priority demotion and periodic boosting",
+        "Unit tests for SLO predictive admission rejection",
+        "Unit tests for multi-tenant fair-share scheduling",
+        "Unit tests for speculative decoding acceptance and correction",
+        "Benchmark measuring MLFQ overhead and speculative decoding speedup vs alpha"
       ]
     }
   ]

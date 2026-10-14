@@ -16,9 +16,6 @@ import httpx
 from llmhub.config import LLMHubConfig
 from llmhub.core.gguf_parser import GGUFParser
 from llmhub.core.registry import ModelRegistry, ModelRecord
-from llmhub.hardware.detector import HardwareDetector
-from llmhub.hardware.manifest import ModelManifest
-from llmhub.hardware.tuner import AutoTuner
 
 class DownloadError(Exception):
     pass
@@ -220,6 +217,10 @@ class HFDownloader:
         metadata = GGUFParser.parse_file(model_path)
 
         # Generate and save standardized ModelManifest with hardware profiling
+        from llmhub.hardware.detector import HardwareDetector
+        from llmhub.hardware.manifest import ModelManifest
+        from llmhub.hardware.tuner import AutoTuner
+
         threads, _ = AutoTuner.select_threads()
         actual_free_ram = HardwareDetector.get_profile().free_ram_bytes
         rec_ctx, _, _ = AutoTuner.calculate_safe_context(
