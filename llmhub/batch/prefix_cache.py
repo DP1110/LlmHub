@@ -177,6 +177,20 @@ class PrefixCache:
         self._total_tokens = 0
         self._known_lengths.clear()
 
+    def prune_memory_pressure(self, ratio: float = 0.5) -> int:
+        """Evict oldest entries to free memory under system pressure.
+        
+        Args:
+            ratio: Fraction of cached tokens to evict (e.g. 0.5 = evict 50%).
+        Returns:
+            Number of tokens evicted.
+        """
+        target_tokens = int(self._total_tokens * (1.0 - max(0.0, min(1.0, ratio))))
+        initial_tokens = self._total_tokens
+        while self._total_tokens > target_tokens and self._entries:
+            self._evict_oldest()
+        return initial_tokens - self._total_tokens
+
     def get_stats(self) -> Dict[str, Any]:
         """Return operational statistics for prefix caching."""
         hit_rate = (self.cache_hits / self.total_queries) * 100.0 if self.total_queries > 0 else 0.0

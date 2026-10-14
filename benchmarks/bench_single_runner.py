@@ -483,5 +483,65 @@ def run_benchmarks() -> None:
     # Phase 7 Advanced Scheduling & Speculative Decoding
     benchmark_advanced_scheduling()
 
+    # Phase 8 Termux & Low-Memory Mode
+    benchmark_termux_low_memory()
+
+def benchmark_termux_low_memory() -> None:
+    from llmhub.termux.thermal import ThermalMonitor
+    from llmhub.termux.memory_pressure import MemoryPressureMonitor
+    from llmhub.termux.downshift import DownshiftEngine
+    from llmhub.batch.prefix_cache import PrefixCache
+
+    print("\n" + "=" * 80)
+    print(" PHASE 8 TERMUX & LOW-MEMORY MONITORING OVERHEAD BENCHMARK")
+    print("=" * 80)
+
+    # 1. Thermal monitor probe latency
+    tm = ThermalMonitor()
+    n_thermal = 50
+    start = time.perf_counter()
+    for _ in range(n_thermal):
+        tm.probe()
+    thermal_us = ((time.perf_counter() - start) / n_thermal) * 1_000_000.0
+    print(f" Thermal Sensor Probe Overhead:       {thermal_us:.3f} us / probe")
+
+    # 2. Memory pressure monitor probe latency
+    mpm = MemoryPressureMonitor()
+    n_mem = 1000
+    start = time.perf_counter()
+    for _ in range(n_mem):
+        mpm.probe()
+    mem_us = ((time.perf_counter() - start) / n_mem) * 1_000_000.0
+    print(f" Memory Pressure / LMK Probe Overhead:{mem_us:.3f} us / probe")
+
+    # 3. Downshift context search latency
+    engine = DownshiftEngine()
+    n_downshift = 2000
+    start = time.perf_counter()
+    for _ in range(n_downshift):
+        engine.find_fitting_context(
+            weights_bytes=1024 * 1024 * 1024,
+            n_layers=32,
+            n_kv_heads=8,
+            head_dim=128,
+            desired_ctx=2048,
+            available_ram_bytes=int(1.2 * 1024**3),
+            safety_margin=0.85,
+        )
+    downshift_us = ((time.perf_counter() - start) / n_downshift) * 1_000_000.0
+    print(f" Context Downshifting Calculation:    {downshift_us:.3f} us / evaluation")
+
+    # 4. Prefix cache memory pressure pruning
+    cache = PrefixCache(max_cached_tokens=10000)
+    for i in range(50):
+        cache.insert_prefix(f"model_{i}", list(range(i * 10, i * 10 + 64)))
+    n_prune = 500
+    start = time.perf_counter()
+    for _ in range(n_prune):
+        cache.prune_memory_pressure(ratio=0.1)
+    prune_us = ((time.perf_counter() - start) / n_prune) * 1_000_000.0
+    print(f" Prefix Cache Pressure Pruning:       {prune_us:.3f} us / prune")
+    print("=" * 80)
+
 if __name__ == "__main__":
     run_benchmarks()

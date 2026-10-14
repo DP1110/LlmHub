@@ -77,6 +77,17 @@ class LLMHubConfig:
             "storage": {
                 "models_dir": str(self.models_dir),
                 "db_path": str(self.db_path),
+            },
+            "termux": {
+                "enable_wake_lock": True,
+                "enable_thermal_throttle": True,
+                "thermal_poll_interval_s": 5.0,
+                "thermal_warning_temp_c": 75.0,
+                "thermal_critical_temp_c": 85.0,
+                "enable_memory_pressure_monitor": True,
+                "low_memory_mode": False,
+                "allow_ctx_downshift": True,
+                "min_ctx_size": 512,
             }
         }
 
@@ -113,3 +124,28 @@ class LLMHubConfig:
         path = self.models_dir / org / name / quant.lower()
         path.mkdir(parents=True, exist_ok=True)
         return path
+
+    @property
+    def is_low_memory_mode(self) -> bool:
+        """Check if low-memory mode is explicitly requested or running on tight RAM / Termux."""
+        return bool(self.settings.get("termux", {}).get("low_memory_mode", False))
+
+    def set_low_memory_mode(self, enabled: bool) -> None:
+        """Toggle low-memory mode, adjusting context and safety settings."""
+        if "termux" not in self.settings:
+            self.settings["termux"] = {}
+        self.settings["termux"]["low_memory_mode"] = enabled
+        if enabled:
+            # Conservative tuning for low-memory environments
+            self.settings["runtime"]["default_context_size"] = min(
+                1024, self.settings.get("runtime", {}).get("default_context_size", 2048)
+            )
+            self.settings["runtime"]["memory_safety_margin"] = 0.90
+            self.settings["runtime"]["use_mlock"] = False
+            self.settings["batch"]["default_max_slots"] = min(
+                2, self.settings.get("batch", {}).get("default_max_slots", 4)
+            )
+            self.settings["batch"]["max_cached_tokens"] = min(
+                8192, self.settings.get("batch", {}).get("max_cached_tokens", 32768)
+            )
+

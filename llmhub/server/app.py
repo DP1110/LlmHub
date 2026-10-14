@@ -26,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from llmhub.config import LLMHubConfig
+from llmhub.config import LLMHubConfig, is_termux
 from llmhub.core.registry import ModelRegistry
 from llmhub.core.template import ChatTemplateEngine
 from llmhub.hardware.detector import HardwareDetector
@@ -37,6 +37,7 @@ from llmhub.scheduler.slo import SLOViolationError
 from llmhub.server.backend import Backend
 from llmhub.server.llamacpp import LlamaCppBackend
 from llmhub.server.model_manager import LoadedModel, MemoryAdmissionError, ModelManager
+from llmhub.termux.controller import TermuxController
 
 START_TIME = time.time()
 
@@ -68,6 +69,24 @@ class ServerState:
         self.registry = ModelRegistry(self.config.db_path)
         self.model_manager = ModelManager(config=self.config, registry=self.registry)
         self.scheduler = TokenRoundRobinScheduler(model_manager=self.model_manager)
+        self.termux_controller = TermuxController(
+            config=self.config,
+            base_threads=self.config.settings.get("runtime", {}).get("default_threads", 4),
+        )
+        self.termux_controller.set_thread_callback(self.scheduler.set_thermal_thread_limit)
+
+        def _on_memory_pressure(level: Any) -> None:
+            from llmhub.termux.memory_pressure import MemoryPressureLevel
+            if level == MemoryPressureLevel.CRITICAL:
+                for lm in self.model_manager.loaded_models.values():
+                    if hasattr(lm, "batch_engine") and lm.batch_engine and lm.batch_engine.prefix_cache:
+                        lm.batch_engine.prefix_cache.prune_memory_pressure(ratio=0.5)
+            elif level == MemoryPressureLevel.MODERATE:
+                for lm in self.model_manager.loaded_models.values():
+                    if hasattr(lm, "batch_engine") and lm.batch_engine and lm.batch_engine.prefix_cache:
+                        lm.batch_engine.prefix_cache.prune_memory_pressure(ratio=0.25)
+
+        self.termux_controller.set_memory_pressure_callback(_on_memory_pressure)
         self.lock = asyncio.Lock()
 
 state = ServerState()
@@ -77,13 +96,15 @@ def create_app() -> FastAPI:
     async def lifespan(app: FastAPI):
         state.model_manager.start_reaper()
         state.scheduler.start()
+        await state.termux_controller.start()
         yield
+        await state.termux_controller.stop()
         state.scheduler.stop()
         state.model_manager.stop_reaper()
 
     app = FastAPI(
         title="LLMHub Inference Server",
-        version="0.7.0",
+        version="0.8.0",
         description="Offline-first multi-model GGUF inference platform with token-level round-robin scheduling",
         lifespan=lifespan
     )
@@ -104,6 +125,12 @@ def create_app() -> FastAPI:
             "is_model_loaded": len(state.model_manager.loaded_models) > 0,
             "resident_models": list(state.model_manager.loaded_models.keys()),
             "resident_models_count": len(state.model_manager.loaded_models),
+            "termux": {
+                "is_termux": is_termux(),
+                "thermal_state": state.termux_controller.thermal.current_state.value,
+                "memory_pressure": state.termux_controller.memory.probe().level.value,
+                "low_memory_mode": state.config.is_low_memory_mode,
+            }
         }
 
     @app.get("/v1/models")
@@ -193,6 +220,35 @@ def create_app() -> FastAPI:
     @app.get("/api/speculative")
     async def get_speculative_status() -> Dict[str, Any]:
         return {k: eng.get_stats() for k, eng in state.scheduler.speculative_engines.items()}
+
+    @app.get("/api/termux/status")
+    async def get_termux_status() -> Dict[str, Any]:
+        return state.termux_controller.get_status()
+
+    @app.post("/api/termux/wakelock/acquire")
+    async def acquire_wakelock() -> Dict[str, Any]:
+        success = await asyncio.to_thread(state.termux_controller.wakelock.acquire)
+        return {
+            "status": "acquired" if success else "unsupported_or_failed",
+            "is_held": state.termux_controller.wakelock.is_held,
+            "is_supported": state.termux_controller.wakelock.is_supported,
+        }
+
+    @app.post("/api/termux/wakelock/release")
+    async def release_wakelock() -> Dict[str, Any]:
+        success = await asyncio.to_thread(state.termux_controller.wakelock.release)
+        return {
+            "status": "released" if success else "failed",
+            "is_held": state.termux_controller.wakelock.is_held,
+        }
+
+    @app.post("/api/system/low-memory")
+    async def set_low_memory_mode(enabled: bool) -> Dict[str, Any]:
+        state.config.set_low_memory_mode(enabled)
+        return {
+            "low_memory_mode": state.config.is_low_memory_mode,
+            "status": "updated",
+        }
 
     @app.post("/api/scheduler/mode")
     async def set_scheduler_mode(mode: str) -> Dict[str, Any]:

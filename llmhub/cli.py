@@ -277,6 +277,8 @@ def _run_standalone(config: LLMHubConfig, args: argparse.Namespace) -> None:
 
 def cmd_run(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
+    if getattr(args, "low_mem", False):
+        config.set_low_memory_mode(True)
     server_cfg = config.settings.get("server", {})
     host = server_cfg.get("host", "127.0.0.1")
     port = server_cfg.get("port", 11434)
@@ -295,6 +297,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 def cmd_serve(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
+    if getattr(args, "low_mem", False):
+        config.set_low_memory_mode(True)
     server_cfg = config.settings.get("server", {})
     host = args.host or server_cfg.get("host", "127.0.0.1")
     port = args.port or server_cfg.get("port", 11434)
@@ -535,6 +539,52 @@ def cmd_plan(args: argparse.Namespace) -> None:
         print(f"{s.quant:<8} {s.bits_per_weight:<8.1f} {s.weights_size_gb:<10.2f} GB {s.total_ram_needed_gb:<10.2f} GB {s.status:<30}")
     print("=" * 75 + "\n")
 
+def cmd_termux(args: argparse.Namespace) -> None:
+    from llmhub.termux.controller import TermuxController
+    config = LLMHubConfig()
+    controller = TermuxController(config=config)
+
+    if getattr(args, "wake_lock", False):
+        success = controller.wakelock.acquire()
+        print(f"Acquire wake-lock: {'SUCCESS' if success else 'FAILED (Unsupported or error)'}")
+    elif getattr(args, "release_lock", False):
+        success = controller.wakelock.release()
+        print(f"Release wake-lock: {'SUCCESS' if success else 'FAILED'}")
+
+    status = controller.get_status()
+    print("=" * 75)
+    print(" LLMHUB TERMUX & MOBILE PLATFORM DIAGNOSTICS")
+    print("=" * 75)
+    print(f" Termux Environment: {'YES (Android ARM64)' if status['is_termux'] else 'NO (Standard OS)'}")
+    print(f" Non-Root Sandbox:   {'YES (Unprivileged)' if status['is_non_root'] else 'NO (Root/Admin)'}")
+    print(f" Low-Memory Mode:    {'ENABLED' if status['low_memory_mode'] else 'DISABLED'}")
+    print("-" * 75)
+    print(" CPU WAKELOCK")
+    wl = status['wakelock']
+    print(f"   Supported:        {wl['is_supported']}")
+    print(f"   Currently Held:   {wl['is_held']}")
+    print("-" * 75)
+    print(" THERMAL MONITOR")
+    th = status['thermal']
+    print(f"   Thermal State:    {th['state'].upper()}")
+    print(f"   Max Temperature:  {th['max_temp_c']}°C (Avg: {th['avg_temp_c']}°C)")
+    print(f"   Sensor Source:    {th['source']}")
+    print(f"   Effective Threads:{th['effective_threads']} (Base: {th['base_threads']})")
+    if th['zones']:
+        print("   Detected Zones:")
+        for z in th['zones'][:8]:
+            print(f"     - {z['id']} ({z['type']}): {z['temp_c']}°C")
+    print("-" * 75)
+    print(" MEMORY PRESSURE & ANDROID LMK")
+    mp = status['memory_pressure']
+    print(f"   Pressure Level:   {mp['level'].upper()}")
+    print(f"   Available RAM:    {mp['available_ram_mb']:.1f} MB ({mp['available_percent']:.1f}%)")
+    print(f"   Total RAM:        {mp['total_ram_mb']:.1f} MB")
+    print(f"   LMK oom_score_adj:{mp['oom_score_adj'] if mp['oom_score_adj'] is not None else 'N/A'}")
+    if mp.get('psi_full_avg10') is not None:
+        print(f"   PSI Stall (full): {mp['psi_full_avg10']:.2f}%")
+    print("=" * 75 + "\n")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmhub",
@@ -556,6 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-t", "--threads", type=int, default=None, help="Number of CPU worker threads")
     p_run.add_argument("-m", "--max-tokens", type=int, default=512, help="Maximum generated tokens")
     p_run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    p_run.add_argument("--low-mem", action="store_true", help="Enable low-memory mode with context downshifting")
     p_run.add_argument("--local", action="store_true", help="Force local direct execution without HTTP daemon")
     p_run.set_defaults(func=cmd_run)
 
@@ -563,7 +614,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = subparsers.add_parser("serve", help="Start the LLMHub HTTP API server daemon")
     p_serve.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=None, help="Bind port (default: 11434)")
+    p_serve.add_argument("--low-mem", action="store_true", help="Start server in low-memory mode")
     p_serve.set_defaults(func=cmd_serve)
+
+    # termux
+    p_termux = subparsers.add_parser("termux", help="Inspect Termux/mobile environment, thermals, and memory pressure")
+    p_termux.add_argument("--wake-lock", action="store_true", help="Acquire Android CPU wake-lock")
+    p_termux.add_argument("--release-lock", action="store_true", help="Release Android CPU wake-lock")
+    p_termux.set_defaults(func=cmd_termux)
 
     # ps
     p_ps = subparsers.add_parser("ps", help="Show active running models, sessions, and memory (/api/ps)")

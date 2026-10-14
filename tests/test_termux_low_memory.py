@@ -1,0 +1,399 @@
+"""Tests for Phase 8: Termux, Android non-root sandbox, wakelock, thermals, and low-memory mode."""
+
+import asyncio
+from pathlib import Path
+from typing import Dict, List
+from unittest.mock import MagicMock, patch
+import pytest
+from fastapi.testclient import TestClient
+
+from llmhub.batch.prefix_cache import PrefixCache
+from llmhub.config import LLMHubConfig, is_termux
+from llmhub.hardware.detector import HardwareDetector
+from llmhub.scheduler.policy import ThreadingMode, ThreadingStrategy
+from llmhub.scheduler.scheduler import TokenRoundRobinScheduler
+from llmhub.server.app import create_app, state
+from llmhub.server.backend import Backend, DecodeResult, SessionState
+from llmhub.server.model_manager import ModelManager
+from llmhub.termux.controller import TermuxController
+from llmhub.termux.downshift import DownshiftEngine
+from llmhub.termux.memory_pressure import MemoryPressureLevel, MemoryPressureMonitor, MemoryPressureStats
+from llmhub.termux.thermal import ThermalMonitor, ThermalReading, ThermalState, ThermalZoneInfo
+from llmhub.termux.wakelock import WakelockManager
+
+class MockBackend(Backend):
+    def __init__(self) -> None:
+        self.loaded = False
+        self.n_threads = 4
+        self.closed_sessions: List[str] = []
+
+    def load(self, model_path: Path, n_ctx: int, n_threads: int, use_mmap: bool = True, use_mlock: bool = False) -> None:
+        self.loaded = True
+        self.n_threads = n_threads
+
+    def unload(self) -> None:
+        self.loaded = False
+
+    def new_session(self, session_id: str, prompt_tokens: List[int]) -> SessionState:
+        return SessionState(session_id=session_id, prompt_tokens=prompt_tokens)
+
+    def decode_step(self, session: SessionState, n_tokens: int = 1) -> DecodeResult:
+        token = 100 + len(session.generated_tokens)
+        session.generated_tokens.append(token)
+        return DecodeResult(
+            session_id=session.session_id,
+            tokens=[token],
+            text_deltas=[f"t{token}"],
+            done=len(session.generated_tokens) >= 5,
+        )
+
+    def prefill_chunk(self, session: SessionState, chunk_tokens: List[int]) -> int:
+        session.prefilled_tokens += len(chunk_tokens)
+        return len(chunk_tokens)
+
+    def set_n_threads(self, n_threads: int) -> None:
+        self.n_threads = n_threads
+
+    def close_session(self, session_id: str) -> None:
+        self.closed_sessions.append(session_id)
+
+def test_termux_environment_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify Termux detection via environment variable and filesystem markers."""
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    # Default without env or path
+    with patch("os.path.exists", return_value=False):
+        assert not is_termux()
+
+    # With TERMUX_VERSION
+    monkeypatch.setenv("TERMUX_VERSION", "0.118.0")
+    assert is_termux()
+
+    # With Termux path marker
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    with patch("os.path.exists", side_effect=lambda p: str(p) == "/data/data/com.termux"):
+        assert is_termux()
+
+def test_wakelock_lifecycle_mocked() -> None:
+    """Verify acquire, release, idempotency, and context manager semantics."""
+    executed_commands: List[List[str]] = []
+
+    def mock_runner(cmd: List[str]) -> int:
+        executed_commands.append(cmd)
+        return 0
+
+    wm = WakelockManager(command_runner=mock_runner, force_supported=True)
+    assert wm.is_supported
+    assert not wm.is_held
+
+    # Acquire
+    assert wm.acquire()
+    assert wm.is_held
+    assert len(executed_commands) == 1
+
+    # Idempotent acquire (should not re-execute command)
+    assert wm.acquire()
+    assert len(executed_commands) == 1
+
+    # Release
+    assert wm.release()
+    assert not wm.is_held
+    assert len(executed_commands) == 2
+
+    # Idempotent release
+    assert wm.release()
+    assert len(executed_commands) == 2
+
+    # Context manager
+    with wm:
+        assert wm.is_held
+    assert not wm.is_held
+
+def test_wakelock_async_context_manager() -> None:
+    """Verify async context manager behavior."""
+    async def _run() -> None:
+        executed: List[List[str]] = []
+        wm = WakelockManager(command_runner=lambda cmd: executed.append(cmd) or 0, force_supported=True)
+
+        async with wm:
+            assert wm.is_held
+        assert not wm.is_held
+
+    asyncio.run(_run())
+
+def test_wakelock_unsupported_fallback() -> None:
+    """Verify graceful no-op on non-Termux systems."""
+    wm = WakelockManager(force_supported=False)
+    assert not wm.is_supported
+    assert not wm.acquire()
+    assert not wm.is_held
+    assert wm.release()
+
+def test_thermal_monitor_state_classification() -> None:
+    """Verify thermal temperature thresholds and state classification."""
+    tm = ThermalMonitor(warning_temp_c=75.0, critical_temp_c=85.0, warm_temp_c=65.0)
+
+    # 50C -> NORMAL
+    tm.inject_temperature(50.0)
+    assert tm.probe().state == ThermalState.NORMAL
+    assert tm.calculate_target_threads(4, ThermalState.NORMAL) == 4
+
+    # 68C -> WARM
+    tm.inject_temperature(68.0)
+    assert tm.probe().state == ThermalState.WARM
+    assert tm.calculate_target_threads(4, ThermalState.WARM) == 3
+
+    # 78C -> HOT (50% thread reduction)
+    tm.inject_temperature(78.0)
+    assert tm.probe().state == ThermalState.HOT
+    assert tm.calculate_target_threads(4, ThermalState.HOT) == 2
+
+    # 88C -> CRITICAL (1 thread limit)
+    tm.inject_temperature(88.0)
+    assert tm.probe().state == ThermalState.CRITICAL
+    assert tm.calculate_target_threads(4, ThermalState.CRITICAL) == 1
+
+def test_thermal_monitor_hysteresis() -> None:
+    """Verify hysteresis algorithm prevents rapid oscillation between thermal states."""
+    tm = ThermalMonitor(
+        warning_temp_c=75.0,
+        critical_temp_c=85.0,
+        warm_temp_c=65.0,
+        cooldown_margin_c=3.0,
+        consecutive_cool_required=2,
+    )
+
+    # Escalate to HOT
+    tm.inject_temperature(80.0)
+    reading, threads = tm.update_and_get_target_threads(4)
+    assert tm.current_state == ThermalState.HOT
+    assert threads == 2
+
+    # Temperature drops to 73C (below 75C warning, but above 75 - 3 = 72C cooldown threshold)
+    tm.inject_temperature(73.0)
+    reading, threads = tm.update_and_get_target_threads(4)
+    # Hysteresis: stays in HOT because it hasn't reached safe cooldown margin
+    assert tm.current_state == ThermalState.HOT
+
+    # Temperature drops to 70C (below 72C, first cool reading)
+    tm.inject_temperature(70.0)
+    reading, threads = tm.update_and_get_target_threads(4)
+    # Still HOT (requires 2 consecutive cool readings)
+    assert tm.current_state == ThermalState.HOT
+
+    # Second consecutive cool reading
+    tm.inject_temperature(70.0)
+    reading, threads = tm.update_and_get_target_threads(4)
+    # Now cooled down to WARM
+    assert tm.current_state == ThermalState.WARM
+
+    # WN-1: A spike above cooldown threshold immediately resets cool counter
+    tm.inject_temperature(60.0)  # 1st cool towards NORMAL
+    tm.update_and_get_target_threads(4)
+    assert tm._cool_reading_count == 1
+    tm.inject_temperature(74.0)  # Temperature spike back to WARM
+    tm.update_and_get_target_threads(4)
+    assert tm._cool_reading_count == 0
+
+def test_memory_pressure_monitor_classification() -> None:
+    """Verify memory pressure classification and LMK risk detection."""
+    mpm = MemoryPressureMonitor()
+
+    # Nominal: 8GB total, 4GB available
+    mpm.inject_stats(
+        MemoryPressureStats(
+            level=MemoryPressureLevel.NOMINAL,
+            total_ram_bytes=8 * 1024**3,
+            available_ram_bytes=4 * 1024**3,
+            free_ram_bytes=3 * 1024**3,
+            available_percent=50.0,
+            oom_score_adj=0,
+        )
+    )
+    assert mpm.probe().level == MemoryPressureLevel.NOMINAL
+
+    # Moderate: 4GB total, 800MB available
+    mpm.inject_stats(
+        MemoryPressureStats(
+            level=MemoryPressureLevel.MODERATE,
+            total_ram_bytes=4 * 1024**3,
+            available_ram_bytes=800 * 1024**2,
+            free_ram_bytes=400 * 1024**2,
+            available_percent=19.5,
+            oom_score_adj=200,
+        )
+    )
+    assert mpm.probe().level == MemoryPressureLevel.MODERATE
+
+    # Critical: 4GB total, 300MB available
+    mpm.inject_stats(
+        MemoryPressureStats(
+            level=MemoryPressureLevel.CRITICAL,
+            total_ram_bytes=4 * 1024**3,
+            available_ram_bytes=300 * 1024**2,
+            free_ram_bytes=100 * 1024**2,
+            available_percent=7.3,
+            oom_score_adj=905,
+        )
+    )
+    assert mpm.probe().level == MemoryPressureLevel.CRITICAL
+
+def test_context_downshifting_under_pressure() -> None:
+    """Verify dynamic context clamping given memory pressure levels."""
+    engine = DownshiftEngine()
+
+    # Nominal keeps 2048
+    assert engine.adjust_context_for_pressure(2048, MemoryPressureLevel.NOMINAL) == 2048
+
+    # Moderate clamps to 1024
+    assert engine.adjust_context_for_pressure(2048, MemoryPressureLevel.MODERATE) == 1024
+    assert engine.adjust_context_for_pressure(512, MemoryPressureLevel.MODERATE) == 512
+
+    # Critical clamps to 512
+    assert engine.adjust_context_for_pressure(2048, MemoryPressureLevel.CRITICAL) == 512
+
+    # CR-1: When requested context is smaller than min_ctx (e.g. 256), never upshift!
+    assert engine.adjust_context_for_pressure(256, MemoryPressureLevel.CRITICAL) == 256
+    assert engine.adjust_context_for_pressure(256, MemoryPressureLevel.MODERATE) == 256
+
+    # Low-memory mode flag clamps to 1024
+    assert engine.adjust_context_for_pressure(4096, MemoryPressureLevel.NOMINAL, low_memory_mode=True) == 1024
+
+def test_find_fitting_context_algorithm() -> None:
+    """Verify find_fitting_context selects the largest viable context window."""
+    engine = DownshiftEngine()
+
+    # 1 GB model weights with 1.2 GB usable RAM
+    # 2048 context ~256 MB KV cache -> 1.0 + 0.256 + 0.064 = 1.32 GB (shortfall)
+    # 1024 context ~128 MB KV cache -> 1.0 + 0.128 + 0.064 = 1.192 GB (fits!)
+    fitting_ctx, rationale = engine.find_fitting_context(
+        weights_bytes=1024 * 1024 * 1024,
+        n_layers=32,
+        n_kv_heads=8,
+        head_dim=128,
+        desired_ctx=2048,
+        available_ram_bytes=int(1.25 * 1024**3),
+        safety_margin=0.95,
+        min_ctx=512,
+    )
+    assert fitting_ctx is not None
+    assert fitting_ctx <= 1024
+
+    # Extremely constrained RAM: cannot fit even 512 context
+    impossible_ctx, impossible_rationale = engine.find_fitting_context(
+        weights_bytes=1024 * 1024 * 1024,
+        n_layers=32,
+        n_kv_heads=8,
+        head_dim=128,
+        desired_ctx=2048,
+        available_ram_bytes=500 * 1024 * 1024,  # only 500 MB RAM for 1GB weights
+        safety_margin=0.85,
+    )
+    assert impossible_ctx is None
+
+def test_quant_downshifting_suggestions() -> None:
+    """Verify quantization suggestions scale down from Q8 to Q2 under RAM constraints."""
+    engine = DownshiftEngine()
+
+    # 7B model on 4GB device (available ~3.5GB)
+    res = engine.suggest_downshifted_quant(
+        param_count_billions=7.0,
+        available_ram_bytes=int(3.5 * 1024**3),
+        safety_margin=0.85,
+    )
+    assert res is not None
+    quant, bpw, desc = res
+    # Q4_K_M (4.5 bpw * 7B / 8 = 3.93GB > 2.97GB limit), so should pick Q3_K_M or Q2_K
+    assert quant in ("Q3_K_M", "Q2_K")
+
+    # 70B model on 4GB device cannot fit any quantization
+    impossible = engine.suggest_downshifted_quant(
+        param_count_billions=70.0,
+        available_ram_bytes=int(4.0 * 1024**3),
+    )
+    assert impossible is None
+
+def test_prefix_cache_pressure_pruning() -> None:
+    """Verify prefix cache shedding entries under memory pressure."""
+    cache = PrefixCache(max_cached_tokens=4096)
+    # Insert 10 entries of 64 tokens each = 640 tokens
+    for i in range(10):
+        tokens = list(range(i * 100, i * 100 + 64))
+        cache.insert_prefix(f"model_{i}", tokens)
+
+    initial_tokens = cache.get_stats()["cached_tokens"]
+    assert initial_tokens > 0
+
+    # Prune 50%
+    evicted = cache.prune_memory_pressure(ratio=0.5)
+    assert evicted > 0
+    after_tokens = cache.get_stats()["cached_tokens"]
+    assert after_tokens <= initial_tokens // 2
+
+def test_threading_strategy_thermal_cap() -> None:
+    """Verify ThreadingStrategy caps thread allocation when max_threads_cap is set."""
+    ts = ThreadingStrategy(mode=ThreadingMode.TIME_SLICE)
+    base_cores = ts.total_physical_cores
+
+    allocs = ts.calculate_threads({"model_a"})
+    assert allocs["model_a"] == base_cores
+
+    # Throttle due to thermals
+    ts.set_max_threads_cap(2)
+    allocs_throttled = ts.calculate_threads({"model_a"})
+    assert allocs_throttled["model_a"] == min(base_cores, 2)
+
+    # Reset
+    ts.set_max_threads_cap(None)
+    assert ts.calculate_threads({"model_a"})["model_a"] == base_cores
+
+def test_termux_controller_tick_and_status() -> None:
+    """Verify TermuxController tick updates status and invokes thread callback."""
+    config = LLMHubConfig()
+    controller = TermuxController(config=config, base_threads=4)
+
+    adjusted_threads: List[int] = []
+    controller.set_thread_callback(lambda t: adjusted_threads.append(t))
+
+    # Inject HOT temperature into thermal monitor
+    controller.thermal.inject_temperature(80.0)
+    status = controller.tick()
+
+    assert status["thermal"]["state"] == "hot"
+    assert status["thermal"]["effective_threads"] == 2
+    assert 2 in adjusted_threads
+
+    assert "wakelock" in status
+    assert "memory_pressure" in status
+
+def test_api_termux_endpoints() -> None:
+    """Verify /api/termux/status, wakelock, and /api/system/low-memory endpoints."""
+    app = create_app()
+    client = TestClient(app)
+
+    # 1. Healthz includes termux info
+    res = client.get("/healthz")
+    assert res.status_code == 200
+    data = res.json()
+    assert "termux" in data
+    assert "thermal_state" in data["termux"]
+    assert "memory_pressure" in data["termux"]
+
+    # 2. /api/termux/status
+    res = client.get("/api/termux/status")
+    assert res.status_code == 200
+    st = res.json()
+    assert "wakelock" in st
+    assert "thermal" in st
+    assert "memory_pressure" in st
+
+    # 3. /api/termux/wakelock/acquire and release
+    res_acq = client.post("/api/termux/wakelock/acquire")
+    assert res_acq.status_code == 200
+
+    res_rel = client.post("/api/termux/wakelock/release")
+    assert res_rel.status_code == 200
+
+    # 4. /api/system/low-memory toggle
+    res_lm = client.post("/api/system/low-memory?enabled=true")
+    assert res_lm.status_code == 200
+    assert res_lm.json()["low_memory_mode"] is True

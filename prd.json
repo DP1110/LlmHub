@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-7-advanced-scheduling",
+  "branchName": "phase-8-termux-low-memory",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -487,6 +487,84 @@
         "Unit tests for multi-tenant fair-share scheduling",
         "Unit tests for speculative decoding acceptance and correction",
         "Benchmark measuring MLFQ overhead and speculative decoding speedup vs alpha"
+      ]
+    },
+    {
+      "id": "US-039",
+      "title": "Termux Non-Root Sandbox & Environment Detection",
+      "phase": 8,
+      "description": "Probe Termux environment, detect non-root execution constraints, validate filesystem paths under /data/data/com.termux/files, and enforce unprivileged memory configurations.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Detect Termux environment via TERMUX_VERSION and filesystem prefix",
+        "Enforce unprivileged memory operations (disable mlock, rely on mmap page cache)",
+        "Isolate IPC and sockets in user-scoped ~/.llmhub/run/ directory",
+        "Zero crash or permission failure when running without root privileges"
+      ]
+    },
+    {
+      "id": "US-040",
+      "title": "Termux Wakelock Lifecycle Management (termux-wake-lock)",
+      "phase": 8,
+      "description": "Acquire and release Android system CPU wake locks via termux-wake-lock / termux-wake-unlock to prevent deep-sleep CPU throttling or background process suspension.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Discover termux-wake-lock and termux-wake-unlock in PATH or Termux prefix",
+        "Acquire wake-lock on server start or when sessions become active",
+        "Release wake-lock on shutdown or during idle timeouts",
+        "Safe no-op fallback with warning on non-Termux systems or when termux-tools is absent"
+      ]
+    },
+    {
+      "id": "US-041",
+      "title": "Thermal Throttling Monitor & Adaptive Thread Reduction",
+      "phase": 8,
+      "description": "Monitor SoC thermal zones (/sys/class/thermal/thermal_zone*/temp) and dynamically downscale active worker threads when temperature exceeds thresholds (75C, 85C) to avoid kernel thermal shutdown.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Cross-platform thermal probing (/sys/class/thermal, termux-battery-status, psutil fallback)",
+        "Categorize thermal state: NORMAL (<65C), WARM (65-75C), HOT (75-85C), CRITICAL (>85C)",
+        "Automatically reduce scheduler threads when entering HOT or CRITICAL states",
+        "Hysteresis algorithm prevents thread thrashing during temperature fluctuations"
+      ]
+    },
+    {
+      "id": "US-042",
+      "title": "Android Low Memory Killer (LMK) & Memory Pressure Monitor",
+      "phase": 8,
+      "description": "Monitor system memory pressure via /proc/self/oom_score_adj, /proc/meminfo (MemAvailable), and Linux Pressure Stall Information (PSI /proc/pressure/memory).",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Query process oom_score_adj to evaluate Android LMK kill risk",
+        "Classify memory pressure levels (NOMINAL, MODERATE, CRITICAL)",
+        "Parse Linux PSI /proc/pressure/memory when available for stall detection",
+        "Provide real-time telemetry on memory exhaustion likelihood"
+      ]
+    },
+    {
+      "id": "US-043",
+      "title": "Dynamic Context & Quantization Downshifting Under Memory Pressure",
+      "phase": 8,
+      "description": "Dynamically shrink session context windows and recommend lower quantizations (Q3_K, Q2_K) or smaller models when RAM pressure rises.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Automatically downshift context window (e.g. 2048 to 1024 or 512) when memory is tight",
+        "Prune prefix cache entries under MODERATE/CRITICAL memory pressure",
+        "AutoTuner evaluates and suggests downshifted quantization formats to fit in available RAM",
+        "ModelManager downshifts context length before rejecting if downshifting is permitted"
+      ]
+    },
+    {
+      "id": "US-044",
+      "title": "Termux Single-Line Installer, CLI Diagnostic, & Observability APIs",
+      "phase": 8,
+      "description": "Provide a complete bash install script (install-termux.sh), CLI command `llmhub termux`, and HTTP endpoint `/api/termux/status`.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Script install-termux.sh automates package installation, dependencies, and environment setup",
+        "CLI `llmhub termux` displays battery/thermal/LMK/wakelock status",
+        "HTTP endpoint `/api/termux/status` exposes JSON status for remote monitoring",
+        "CLI flag `--low-mem` enables aggressive resource conservation"
       ]
     }
   ]

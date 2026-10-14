@@ -23,6 +23,7 @@ from llmhub.core.template import ChatTemplateEngine
 from llmhub.hardware.detector import HardwareDetector
 from llmhub.server.backend import Backend, DecodeResult, SessionState
 from llmhub.server.llamacpp import LlamaCppBackend
+from llmhub.termux.downshift import DownshiftEngine
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
 
 class MemoryAdmissionError(Exception):
@@ -255,6 +256,28 @@ class ModelManager:
 
             # Calculate exact memory requirement
             w_b, kv_b, ov_b, total_b = self.calculate_model_memory(file_path, metadata, ctx)
+
+            # Check if downshifting context is needed to fit under memory pressure
+            allow_downshift = self.config.settings.get("termux", {}).get("allow_ctx_downshift", True)
+            can_admit, avail_ram, shortfall = self.check_admission(total_b)
+            if not can_admit and allow_downshift:
+                candidates = self.get_eviction_candidates()
+                total_reclaimable = sum(m.total_memory_bytes for m in candidates)
+                total_avail_with_eviction = avail_ram + total_reclaimable
+
+                fitting_ctx, rationale = DownshiftEngine.find_fitting_context(
+                    weights_bytes=w_b,
+                    n_layers=metadata.block_count,
+                    n_kv_heads=metadata.head_count_kv,
+                    head_dim=metadata.head_dim,
+                    desired_ctx=ctx,
+                    available_ram_bytes=total_avail_with_eviction,
+                    safety_margin=1.0,  # Already factored in check_admission
+                    min_ctx=self.config.settings.get("termux", {}).get("min_ctx_size", 512),
+                )
+                if fitting_ctx and fitting_ctx < ctx:
+                    ctx = fitting_ctx
+                    w_b, kv_b, ov_b, total_b = self.calculate_model_memory(file_path, metadata, ctx)
 
             # Memory admission control: evict idle models if necessary
             self.evict_for_admission(total_b)

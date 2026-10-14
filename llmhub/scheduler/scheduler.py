@@ -399,16 +399,19 @@ class TokenRoundRobinScheduler:
             self._emit_terminal_packet(s, {"done": True, "stop_reason": "timeout", "error": s.error})
             await self._cleanup_session_resources(s)
 
+        # 2. Re-balance CPU threading allocation for active models
         async with self.lock:
-            # 2. Re-balance CPU threading allocation for active models
             active_tags = self.get_active_model_tags()
             thread_allocs = self.threading_strategy.calculate_threads(active_tags)
-            for tag, threads in thread_allocs.items():
-                loaded = self.model_manager.get_model(tag)
-                if loaded and loaded.n_threads != threads:
+
+        for tag, threads in thread_allocs.items():
+            loaded = self.model_manager.get_model(tag)
+            if loaded and loaded.n_threads != threads:
+                async with loaded.inference_lock:
                     loaded.n_threads = threads
                     loaded.backend.set_n_threads(threads)
 
+        async with self.lock:
             # 3. Select next runnable session via MLFQ / Fair-Share / Deficit Round-Robin
             session: Optional[SchedSession] = None
             if self.enable_mlfq:
@@ -751,6 +754,14 @@ class TokenRoundRobinScheduler:
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
             self._loop_task = None
+
+    def set_thermal_thread_limit(self, max_threads: Optional[int]) -> None:
+        """Dynamically cap maximum CPU threads across all models due to thermal constraints."""
+        self.threading_strategy.set_max_threads_cap(max_threads)
+
+    def set_threading_mode(self, mode: ThreadingMode) -> None:
+        """Switch CPU threading mode dynamically."""
+        self.threading_strategy.mode = mode
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Aggregate real-time metrics across all active and completed sessions."""

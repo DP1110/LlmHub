@@ -19,6 +19,14 @@ class ThreadingStrategy:
         self.mode = mode
         self.profile = profile or HardwareDetector.get_profile()
         self.total_physical_cores = max(1, self.profile.cpu.physical_cores)
+        self.max_threads_cap: Optional[int] = None
+
+    def set_max_threads_cap(self, cap: Optional[int]) -> None:
+        """Dynamically cap maximum CPU threads across all models (e.g. for thermal throttling)."""
+        if cap is not None:
+            self.max_threads_cap = max(1, cap)
+        else:
+            self.max_threads_cap = None
 
     def calculate_threads(self, active_model_tags: Set[str]) -> Dict[str, int]:
         """Calculate thread allocation for each active model according to active mode."""
@@ -27,15 +35,20 @@ class ThreadingStrategy:
             return {}
 
         allocations: Dict[str, int] = {}
+        avail_cores = (
+            min(self.total_physical_cores, self.max_threads_cap)
+            if self.max_threads_cap is not None
+            else self.total_physical_cores
+        )
 
         if self.mode == ThreadingMode.TIME_SLICE:
             # Mode (a): Every model gets all physical cores during its time slice
             for tag in active_model_tags:
-                allocations[tag] = self.total_physical_cores
+                allocations[tag] = avail_cores
 
         elif self.mode == ThreadingMode.PARTITION:
             # Mode (b): Statically partition physical cores evenly among active models
-            threads_per_model = max(1, self.total_physical_cores // active_count)
+            threads_per_model = max(1, avail_cores // active_count)
             for tag in active_model_tags:
                 allocations[tag] = threads_per_model
 
@@ -43,18 +56,19 @@ class ThreadingStrategy:
             # Mode (c): Dynamic hybrid partitioning
             if active_count == 1:
                 for tag in active_model_tags:
-                    allocations[tag] = self.total_physical_cores
+                    allocations[tag] = avail_cores
             else:
                 if self.profile.cpu.is_hybrid_big_little and self.profile.cpu.performance_cores > 0:
                     # Allocate performance cores + proportional efficiency cores
-                    total_p = self.profile.cpu.performance_cores
-                    total_e = self.profile.cpu.efficiency_cores
+                    total_p = min(self.profile.cpu.performance_cores, avail_cores)
+                    remaining = max(0, avail_cores - total_p)
+                    total_e = min(self.profile.cpu.efficiency_cores, remaining)
                     p_per_model = max(1, total_p // active_count)
                     e_per_model = max(0, total_e // active_count)
                     for tag in active_model_tags:
                         allocations[tag] = max(1, p_per_model + e_per_model)
                 else:
-                    threads_per_model = max(1, self.total_physical_cores // active_count)
+                    threads_per_model = max(1, avail_cores // active_count)
                     for tag in active_model_tags:
                         allocations[tag] = threads_per_model
 
