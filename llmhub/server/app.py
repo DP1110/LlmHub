@@ -1,19 +1,26 @@
 """FastAPI Application providing OpenAI-compatible endpoints and LLMHub system APIs.
 
 Endpoints:
-- POST /v1/chat/completions (SSE streaming and JSON)
+- POST /v1/chat/completions (SSE streaming and JSON across concurrent models)
 - GET  /v1/models (OpenAI model catalog)
-- GET  /api/ps (Active running models, active sessions, memory, and tok/s)
+- GET  /v1/models/{model_id} (OpenAI individual model metadata)
+- GET  /api/ps (Active running models matrix, pinned flags, memory, and tok/s)
 - GET  /api/models (Extended model registry manifest)
-- GET  /healthz (Uptime and status)
+- POST /api/models/{model_spec}/load (Manual load with context & pinning)
+- POST /api/models/{model_spec}/unload (Manual unload)
+- POST /api/models/{model_spec}/pin (Pin model against LRU eviction)
+- POST /api/models/{model_spec}/unpin (Unpin model)
+- GET  /healthz (Uptime and residency status)
 """
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
+from urllib.parse import unquote
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -25,6 +32,7 @@ from llmhub.core.template import ChatTemplateEngine
 from llmhub.hardware.detector import HardwareDetector
 from llmhub.server.backend import Backend
 from llmhub.server.llamacpp import LlamaCppBackend
+from llmhub.server.model_manager import LoadedModel, MemoryAdmissionError, ModelManager
 
 START_TIME = time.time()
 
@@ -45,19 +53,23 @@ class ServerState:
     def __init__(self) -> None:
         self.config = LLMHubConfig()
         self.registry = ModelRegistry(self.config.db_path)
-        self.backend: Backend = LlamaCppBackend()
-        self.current_model_tag: Optional[str] = None
-        self.template_engine: Optional[ChatTemplateEngine] = None
+        self.model_manager = ModelManager(config=self.config, registry=self.registry)
         self.lock = asyncio.Lock()
-        self.inference_lock = asyncio.Lock()
 
 state = ServerState()
 
 def create_app() -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        state.model_manager.start_reaper()
+        yield
+        state.model_manager.stop_reaper()
+
     app = FastAPI(
         title="LLMHub Inference Server",
-        version="0.3.0",
-        description="Offline-first GGUF inference platform with OpenAI API compatibility"
+        version="0.4.0",
+        description="Offline-first multi-model GGUF inference platform with OpenAI API compatibility",
+        lifespan=lifespan
     )
 
     app.add_middleware(
@@ -73,8 +85,9 @@ def create_app() -> FastAPI:
         return {
             "status": "healthy",
             "uptime_seconds": time.time() - START_TIME,
-            "is_model_loaded": state.backend.is_loaded(),
-            "loaded_model": state.current_model_tag,
+            "is_model_loaded": len(state.model_manager.loaded_models) > 0,
+            "resident_models": list(state.model_manager.loaded_models.keys()),
+            "resident_models_count": len(state.model_manager.loaded_models),
         }
 
     @app.get("/v1/models")
@@ -96,7 +109,8 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/models/{model_id:path}")
     async def get_v1_model(model_id: str) -> Dict[str, Any]:
-        record = state.registry.find_model(model_id)
+        clean_id = unquote(model_id)
+        record = state.registry.find_model(clean_id) or state.registry.find_model(model_id)
         if not record:
             raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
         return {
@@ -118,89 +132,89 @@ def create_app() -> FastAPI:
 
     @app.get("/api/ps")
     async def get_ps() -> Dict[str, Any]:
-        info = state.backend.get_info()
-        hw = HardwareDetector.get_profile()
-        return {
-            "model": state.current_model_tag,
-            "backend_status": info.get("status", "unloaded"),
-            "active_sessions": info.get("active_sessions", 0),
-            "memory": info.get("memory", {}),
-            "bandwidth": info.get("bandwidth", {}),
-            "system_ram_free_mb": hw.free_ram_bytes / (1024 * 1024),
-            "suggested_threads": hw.suggested_threads,
-        }
+        return state.model_manager.get_ps_info()
 
-    async def _ensure_model_loaded(model_spec: str) -> None:
-        async with state.lock:
-            record = state.registry.find_model(model_spec)
-            if not record:
-                # Check direct GGUF file path
-                cand = Path(model_spec).resolve()
-                if cand.is_file() and cand.suffix.lower() == ".gguf":
-                    file_path = cand
-                    tag = cand.stem
-                else:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Model '{model_spec}' not found in registry. Pull it first via 'llmhub pull {model_spec}'."
-                    )
-            else:
-                file_path = Path(record.file_path)
-                tag = record.tag
-
-            if state.current_model_tag == tag and state.backend.is_loaded():
-                if state.template_engine is None:
-                    metadata = getattr(state.backend, "metadata", None)
-                    template_str = metadata.chat_template if metadata else None
-                    arch = metadata.architecture if metadata else "llama"
-                    state.template_engine = ChatTemplateEngine(template_str=template_str, architecture=arch)
-                return
-
-            # Check if active inference sessions are currently running
-            if state.current_model_tag != tag and state.backend.is_loaded():
-                info = state.backend.get_info()
-                active = info.get("active_sessions", 0)
-                if active > 0:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Cannot switch model to '{tag}' while active inference session(s) ({active}) are running."
-                    )
-                state.backend.unload()
-
-            # Load model
-            state.backend.load(
-                model_path=file_path,
-                n_ctx=state.config.settings.get("runtime", {}).get("default_context_size", 2048),
-                use_mmap=state.config.settings.get("runtime", {}).get("use_mmap", True),
-                use_mlock=state.config.settings.get("runtime", {}).get("use_mlock", False),
+    @app.post("/api/models/{model_spec:path}/load")
+    async def api_load_model(
+        model_spec: str,
+        n_ctx: Optional[int] = None,
+        pinned: bool = False,
+        keep_alive: Optional[float] = None
+    ) -> Dict[str, Any]:
+        try:
+            m = await state.model_manager.load_model(
+                model_spec,
+                n_ctx=n_ctx,
+                pinned=pinned,
+                keep_alive=keep_alive
             )
-            state.current_model_tag = tag
+            return {
+                "status": "loaded",
+                "tag": m.tag,
+                "pinned": m.pinned,
+                "n_ctx": m.n_ctx,
+                "total_mb": round(m.total_memory_bytes / (1024 * 1024), 1)
+            }
+        except MemoryAdmissionError as e:
+            raise HTTPException(status_code=507, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
-            # Instantiate template engine
-            metadata = getattr(state.backend, "metadata", None)
-            template_str = metadata.chat_template if metadata else None
-            arch = metadata.architecture if metadata else "llama"
-            state.template_engine = ChatTemplateEngine(template_str=template_str, architecture=arch)
+    @app.post("/api/models/{model_spec:path}/unload")
+    async def api_unload_model(model_spec: str, force: bool = False) -> Dict[str, Any]:
+        try:
+            success = await state.model_manager.unload_model(model_spec, force=force)
+            if not success:
+                raise HTTPException(status_code=404, detail=f"Model '{model_spec}' is not resident in memory.")
+            return {"status": "unloaded", "model": model_spec}
+        except RuntimeError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+
+    @app.post("/api/models/{model_spec:path}/pin")
+    async def api_pin_model(model_spec: str) -> Dict[str, Any]:
+        try:
+            await state.model_manager.pin_model(model_spec)
+            return {"status": "pinned", "model": model_spec}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/models/{model_spec:path}/unpin")
+    async def api_unpin_model(model_spec: str) -> Dict[str, Any]:
+        success = await state.model_manager.unpin_model(model_spec)
+        if not success:
+            raise HTTPException(status_code=404, detail=f"Model '{model_spec}' is not resident in memory.")
+        return {"status": "unpinned", "model": model_spec}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest) -> Any:
-        await _ensure_model_loaded(req.model)
-        if not state.template_engine:
-            raise HTTPException(status_code=500, detail="Template engine not initialized.")
+        try:
+            loaded_model = await state.model_manager.get_or_load_model(req.model)
+        except MemoryAdmissionError as e:
+            raise HTTPException(status_code=507, detail=str(e))
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e))
 
         # Render prompt from messages
         messages_dict = [{"role": m.role, "content": m.content or ""} for m in req.messages]
-        prompt = state.template_engine.render(messages_dict, add_generation_prompt=True)
+        prompt = loaded_model.template_engine.render(messages_dict, add_generation_prompt=True)
 
         session_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-        state.backend.new_session(
-            session_id=session_id,
-            prompt=prompt,
-            max_tokens=req.max_tokens,
-            temperature=req.temperature,
-            top_p=req.top_p,
-            stop=req.stop
-        )
+        loaded_model.active_sessions += 1
+        loaded_model.last_active_time = time.monotonic()
+        try:
+            loaded_model.backend.new_session(
+                session_id=session_id,
+                prompt=prompt,
+                max_tokens=req.max_tokens,
+                temperature=req.temperature,
+                top_p=req.top_p,
+                stop=req.stop
+            )
+        except Exception:
+            loaded_model.active_sessions = max(0, loaded_model.active_sessions - 1)
+            raise
 
         if req.stream:
             async def event_generator() -> AsyncGenerator[str, None]:
@@ -225,14 +239,14 @@ def create_app() -> FastAPI:
                     # Run chunked prefill loop
                     is_complete = False
                     while not is_complete:
-                        async with state.inference_lock:
-                            _, is_complete = await asyncio.to_thread(state.backend.prefill_chunk, session_id, 512)
+                        async with loaded_model.inference_lock:
+                            _, is_complete = await asyncio.to_thread(loaded_model.backend.prefill_chunk, session_id, 512)
                         await asyncio.sleep(0)
 
                     while True:
                         # Decode 1 token per step; thread-offloaded and locked against context corruption
-                        async with state.inference_lock:
-                            res = await asyncio.to_thread(state.backend.decode_step, session_id, 1)
+                        async with loaded_model.inference_lock:
+                            res = await asyncio.to_thread(loaded_model.backend.decode_step, session_id, 1)
 
                         for delta in res.text_deltas:
                             chunk_data = {
@@ -251,7 +265,7 @@ def create_app() -> FastAPI:
                             yield f"data: {json.dumps(chunk_data)}\n\n"
 
                         if res.done:
-                            sess = state.backend.get_session(session_id)
+                            sess = loaded_model.backend.get_session(session_id)
                             prompt_len = len(sess.prompt_tokens) if sess else 0
                             final_chunk = {
                                 "id": session_id,
@@ -279,7 +293,11 @@ def create_app() -> FastAPI:
 
                         await asyncio.sleep(0)
                 finally:
-                    state.backend.close_session(session_id)
+                    try:
+                        loaded_model.backend.close_session(session_id)
+                    finally:
+                        loaded_model.active_sessions = max(0, loaded_model.active_sessions - 1)
+                        loaded_model.last_active_time = time.monotonic()
 
             return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -290,23 +308,23 @@ def create_app() -> FastAPI:
                 # Complete prompt prefill
                 is_complete = False
                 while not is_complete:
-                    async with state.inference_lock:
-                        _, is_complete = await asyncio.to_thread(state.backend.prefill_chunk, session_id, 1024)
+                    async with loaded_model.inference_lock:
+                        _, is_complete = await asyncio.to_thread(loaded_model.backend.prefill_chunk, session_id, 1024)
                     await asyncio.sleep(0)
 
                 full_text = ""
                 finish_reason = "stop"
 
                 while True:
-                    async with state.inference_lock:
-                        res = await asyncio.to_thread(state.backend.decode_step, session_id, 4)
+                    async with loaded_model.inference_lock:
+                        res = await asyncio.to_thread(loaded_model.backend.decode_step, session_id, 4)
                     full_text += "".join(res.text_deltas)
                     if res.done:
                         finish_reason = res.stop_reason or "stop"
                         break
                     await asyncio.sleep(0)
 
-                sess = state.backend.get_session(session_id)
+                sess = loaded_model.backend.get_session(session_id)
                 prompt_tokens = len(sess.prompt_tokens) if sess else 0
                 completion_tokens = len(sess.generated_tokens) if sess else 0
 
@@ -332,7 +350,11 @@ def create_app() -> FastAPI:
                     }
                 }
             finally:
-                state.backend.close_session(session_id)
+                try:
+                    loaded_model.backend.close_session(session_id)
+                finally:
+                    loaded_model.active_sessions = max(0, loaded_model.active_sessions - 1)
+                    loaded_model.last_active_time = time.monotonic()
 
     return app
 

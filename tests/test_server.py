@@ -5,9 +5,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from pathlib import Path
+from llmhub.core.template import ChatTemplateEngine
 from llmhub.server.app import app, state
 from llmhub.server.backend import DecodeResult, SessionState
 from llmhub.server.client import LLMHubClient, ServerUnavailableError
+from llmhub.server.model_manager import LoadedModel
 
 @pytest.fixture
 def client():
@@ -121,6 +124,25 @@ class MockBackend:
             "bandwidth": {"theoretical_max_tok_s": 50.0, "bottleneck": "Memory-Bandwidth Bound"}
         }
 
+def setup_mock_model(tag: str = "mock-model") -> LoadedModel:
+    b = MockBackend()
+    lm = LoadedModel(
+        tag=tag,
+        file_path=Path(f"{tag}.gguf"),
+        backend=b,
+        metadata=b.metadata,
+        template_engine=ChatTemplateEngine(None),
+        n_ctx=2048,
+        n_threads=4,
+        weights_bytes=100 * 1024 * 1024,
+        kv_cache_bytes=20 * 1024 * 1024,
+        overhead_bytes=10 * 1024 * 1024,
+        total_memory_bytes=130 * 1024 * 1024,
+        pinned=False
+    )
+    state.model_manager.loaded_models[tag] = lm
+    return lm
+
 @patch.object(state, "registry")
 def test_chat_completions_json(mock_registry, client):
     mock_record = MagicMock()
@@ -128,10 +150,7 @@ def test_chat_completions_json(mock_registry, client):
     mock_record.file_path = "mock.gguf"
     mock_registry.find_model.return_value = mock_record
 
-    orig_backend = state.backend
-    state.backend = MockBackend()
-    state.current_model_tag = "mock-model"
-
+    lm = setup_mock_model("mock-model")
     try:
         payload = {
             "model": "mock-model",
@@ -147,7 +166,7 @@ def test_chat_completions_json(mock_registry, client):
         assert data["choices"][0]["message"]["content"] == "Hello world"
         assert data["usage"]["total_tokens"] > 0
     finally:
-        state.backend = orig_backend
+        state.model_manager.loaded_models.pop("mock-model", None)
 
 @patch.object(state, "registry")
 def test_chat_completions_streaming_sse(mock_registry, client):
@@ -156,10 +175,7 @@ def test_chat_completions_streaming_sse(mock_registry, client):
     mock_record.file_path = "mock.gguf"
     mock_registry.find_model.return_value = mock_record
 
-    orig_backend = state.backend
-    state.backend = MockBackend()
-    state.current_model_tag = "mock-model"
-
+    lm = setup_mock_model("mock-model")
     try:
         payload = {
             "model": "mock-model",
@@ -196,7 +212,7 @@ def test_chat_completions_streaming_sse(mock_registry, client):
         # Chunk 4: stream done marker
         assert chunks[-1] == "[DONE]"
     finally:
-        state.backend = orig_backend
+        state.model_manager.loaded_models.pop("mock-model", None)
 
 @patch.object(state, "registry")
 def test_v1_get_model_by_id(mock_registry, client):
@@ -223,10 +239,7 @@ def test_chat_message_with_null_content(mock_registry, client):
     mock_record.file_path = "mock.gguf"
     mock_registry.find_model.return_value = mock_record
 
-    orig_backend = state.backend
-    state.backend = MockBackend()
-    state.current_model_tag = "mock-model"
-
+    lm = setup_mock_model("mock-model")
     try:
         payload = {
             "model": "mock-model",
@@ -240,7 +253,40 @@ def test_chat_message_with_null_content(mock_registry, client):
         resp = client.post("/v1/chat/completions", json=payload)
         assert resp.status_code == 200
     finally:
-        state.backend = orig_backend
+        state.model_manager.loaded_models.pop("mock-model", None)
+
+def test_api_pin_and_unpin_endpoints(client):
+    lm = setup_mock_model("model-to-pin")
+    try:
+        assert lm.pinned is False
+        # Pin
+        resp = client.post("/api/models/model-to-pin/pin")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "pinned"
+        assert lm.pinned is True
+
+        # Unpin
+        resp_unpin = client.post("/api/models/model-to-pin/unpin")
+        assert resp_unpin.status_code == 200
+        assert resp_unpin.json()["status"] == "unpinned"
+        assert lm.pinned is False
+
+        # Unpin non-resident
+        resp_404 = client.post("/api/models/non-existent/unpin")
+        assert resp_404.status_code == 404
+    finally:
+        state.model_manager.loaded_models.pop("model-to-pin", None)
+
+def test_api_unload_endpoint(client):
+    lm = setup_mock_model("model-to-unload")
+    try:
+        assert "model-to-unload" in state.model_manager.loaded_models
+        resp = client.post("/api/models/model-to-unload/unload")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "unloaded"
+        assert "model-to-unload" not in state.model_manager.loaded_models
+    finally:
+        state.model_manager.loaded_models.pop("model-to-unload", None)
 
 def test_llmhub_client_not_running():
     cli = LLMHubClient(base_url="http://127.0.0.1:59999")

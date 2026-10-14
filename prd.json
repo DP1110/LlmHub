@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-3-backend-server",
+  "branchName": "phase-4-multi-model-manager",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -194,6 +194,66 @@
         "llmhub serve runs the FastAPI / uvicorn server on configured host and port",
         "llmhub run, list, ps interact via HTTP client to http://127.0.0.1:11434",
         "Clear diagnostic warning and guidance if server is not running"
+      ]
+    },
+    {
+      "id": "US-016",
+      "title": "Multi-Model Resident Architecture",
+      "phase": 4,
+      "description": "Build ModelManager to load and manage multiple GGUF models simultaneously resident in RAM with shared mmap page caching and isolated execution contexts.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Support concurrent residence of multiple models in RAM",
+        "Enforce use_mmap=True so weights share kernel page cache",
+        "Thread-safe model registry and reference counting per model"
+      ]
+    },
+    {
+      "id": "US-017",
+      "title": "Mathematical Memory Admission Control",
+      "phase": 4,
+      "description": "Calculate exact required memory (weights + KV cache + compute overhead) against free system RAM with safety margin; reject with clear diagnostics if it cannot fit.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Compute weights_size + kv_cache(ctx) + overhead before attempting load",
+        "Compare against free RAM with configurable safety margin (default 0.85)",
+        "Raise MemoryAdmissionError with clear diagnostics if memory is insufficient"
+      ]
+    },
+    {
+      "id": "US-018",
+      "title": "LRU Model Eviction & Background Keep-Alive Timer",
+      "phase": 4,
+      "description": "Evict idle unpinned models via Least-Recently-Used (LRU) policy when memory is needed, and run background keep_alive expiration reaper (default 5 min).",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Track last_active_time per model upon session creation and termination",
+        "Evict oldest idle models when new model admission requires RAM",
+        "Background asyncio reaper unloads models whose keep_alive expired"
+      ]
+    },
+    {
+      "id": "US-019",
+      "title": "Model Pinning Mechanism (API & CLI)",
+      "phase": 4,
+      "description": "Allow pinning critical models in memory so they are immune to LRU eviction and keep_alive expiry via API endpoints and CLI commands.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "pin_model and unpin_model APIs protecting models from eviction",
+        "CLI commands 'llmhub pin <model>' and 'llmhub unpin <model>'",
+        "Endpoints POST /api/models/{model}/pin and POST /api/models/{model}/unpin"
+      ]
+    },
+    {
+      "id": "US-020",
+      "title": "Multi-Model Server Routing & Resident Status Inspection",
+      "phase": 4,
+      "description": "Update FastAPI server and /api/ps to seamlessly dispatch requests across resident models and report full residency status, pinned flags, and idle times.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Requests to /v1/chat/completions dynamically route to requested model",
+        "Endpoint /api/ps reports all resident models, pinned flags, active sessions, and RAM usage",
+        "Properly increments and decrements active_sessions reference counts per model"
       ]
     }
   ]

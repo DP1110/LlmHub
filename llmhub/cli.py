@@ -318,31 +318,75 @@ def cmd_ps(args: argparse.Namespace) -> None:
         sys.stderr.write(f"[ERROR] Failed to query /api/ps: {e}\n")
         sys.exit(1)
 
-    model = ps_data.get("model")
-    status = ps_data.get("backend_status", "unloaded")
-    sessions = ps_data.get("active_sessions", 0)
-    mem = ps_data.get("memory", {})
-    bw = ps_data.get("bandwidth", {})
+    models_list = ps_data.get("models", [])
+    count = ps_data.get("resident_models_count", len(models_list))
+    total_resident_mb = ps_data.get("total_resident_mb", 0.0)
+    free_ram = ps_data.get("system_ram_free_mb", 0.0)
+    safety_margin = ps_data.get("safety_margin", 0.85)
 
-    print("=" * 80)
-    print(" LLMHUB ACTIVE PROCESSES & RESIDENT MODELS (/api/ps)")
-    print("=" * 80)
-    if not model or status == "unloaded":
+    print("=" * 95)
+    print(" LLMHUB MULTI-MODEL RESIDENT MATRIX (/api/ps)")
+    print("=" * 95)
+    if not models_list:
         print(" No models currently resident in memory.")
-        print(f" System Free RAM:      {ps_data.get('system_ram_free_mb', 0):.1f} MB")
-        print(f" Tuned Worker Threads: {ps_data.get('suggested_threads', 1)}")
+        print(f" System Free RAM: {free_ram:.1f} MB | Safety Margin: {safety_margin * 100:.0f}%")
     else:
-        print(f"{'MODEL':<40} {'STATUS':<10} {'SESSIONS':<10} {'RAM USAGE':<18}")
-        print("-" * 80)
-        tot_mb = mem.get("total_mb", 0)
-        weights_mb = mem.get("weights_mb", 0)
-        kv_mb = mem.get("kv_cache_mb", 0)
-        ram_desc = f"{tot_mb:.1f} MB ({weights_mb:.0f}W + {kv_mb:.0f}KV)"
-        print(f"{model:<40} {status.upper():<10} {sessions:<10} {ram_desc:<18}")
-        print("-" * 80)
-        print(f" Peak Theoretical Bandwidth: {bw.get('theoretical_max_tok_s', 0):.1f} tok/s")
-        print(f" Bottleneck Nature:          {bw.get('bottleneck', 'Memory-Bandwidth Bound')}")
-    print("=" * 80 + "\n")
+        print(f"{'MODEL':<36} {'PINNED':<8} {'ACTIVE':<8} {'IDLE':<10} {'RAM (TOTAL / W+KV)':<22} {'PEAK SPEED':<12}")
+        print("-" * 95)
+        for m in models_list:
+            tag = m.get("tag", "")
+            pinned_str = "YES" if m.get("pinned") else "NO"
+            active_str = str(m.get("active_sessions", 0))
+            idle_str = f"{m.get('idle_seconds', 0.0):.1f}s"
+            mem = m.get("memory", {})
+            tot = mem.get("total_mb", 0)
+            w = mem.get("weights_mb", 0)
+            kv = mem.get("kv_cache_mb", 0)
+            ram_str = f"{tot:.1f}M ({w:.0f}+{kv:.0f})"
+            bw = m.get("bandwidth", {})
+            bw_str = f"{bw.get('theoretical_max_tok_s', 0):.1f} tok/s"
+            print(f"{tag:<36} {pinned_str:<8} {active_str:<8} {idle_str:<10} {ram_str:<22} {bw_str:<12}")
+        print("-" * 95)
+        print(f" Total Resident: {count} models ({total_resident_mb:.1f} MB) | System Free RAM: {free_ram:.1f} MB | Safety Margin: {safety_margin * 100:.0f}%")
+    print("=" * 95 + "\n")
+
+def cmd_pin(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
+
+    if not client.is_server_running():
+        sys.stderr.write(f"[ERROR] LLMHub server is not running on http://{host}:{port}.\n")
+        sys.stderr.write(f"Start the server with 'llmhub serve' before pinning models.\n")
+        sys.exit(1)
+
+    try:
+        client.pin_model(args.model)
+        print(f"Pinned model '{args.model}' in memory (immune to LRU eviction).")
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] Failed to pin model: {e}\n")
+        sys.exit(1)
+
+def cmd_unpin(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
+
+    if not client.is_server_running():
+        sys.stderr.write(f"[ERROR] LLMHub server is not running on http://{host}:{port}.\n")
+        sys.stderr.write(f"Start the server with 'llmhub serve' before unpinning models.\n")
+        sys.exit(1)
+
+    try:
+        client.unpin_model(args.model)
+        print(f"Unpinned model '{args.model}'.")
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] Failed to unpin model: {e}\n")
+        sys.exit(1)
 
 def cmd_rm(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -513,6 +557,16 @@ def build_parser() -> argparse.ArgumentParser:
     # ps
     p_ps = subparsers.add_parser("ps", help="Show active running models, sessions, and memory (/api/ps)")
     p_ps.set_defaults(func=cmd_ps)
+
+    # pin
+    p_pin = subparsers.add_parser("pin", help="Pin a model in RAM against LRU eviction")
+    p_pin.add_argument("model", help="Model name or spec")
+    p_pin.set_defaults(func=cmd_pin)
+
+    # unpin
+    p_unpin = subparsers.add_parser("unpin", help="Unpin a model from RAM")
+    p_unpin.add_argument("model", help="Model name or spec")
+    p_unpin.set_defaults(func=cmd_unpin)
 
     # list
     p_list = subparsers.add_parser("list", help="List all locally installed models")

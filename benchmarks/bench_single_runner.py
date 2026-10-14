@@ -120,10 +120,10 @@ def benchmark_backend_quantum(iterations: int = 1000) -> float:
 def benchmark_server_sse(iterations: int = 100) -> float:
     from fastapi.testclient import TestClient
     from llmhub.server.app import app, state
+    from llmhub.server.model_manager import LoadedModel
     from tests.test_server import MockBackend
     from unittest.mock import MagicMock
 
-    orig_backend = state.backend
     orig_registry = state.registry
     mock_reg = MagicMock()
     mock_rec = MagicMock()
@@ -131,8 +131,23 @@ def benchmark_server_sse(iterations: int = 100) -> float:
     mock_rec.file_path = "mock.gguf"
     mock_reg.find_model.return_value = mock_rec
     state.registry = mock_reg
-    state.backend = MockBackend()
-    state.current_model_tag = "mock"
+
+    b = MockBackend()
+    lm = LoadedModel(
+        tag="mock",
+        file_path=Path("mock.gguf"),
+        backend=b,
+        metadata=b.metadata,
+        template_engine=ChatTemplateEngine(None),
+        n_ctx=2048,
+        n_threads=4,
+        weights_bytes=100 * 1024 * 1024,
+        kv_cache_bytes=20 * 1024 * 1024,
+        overhead_bytes=10 * 1024 * 1024,
+        total_memory_bytes=130 * 1024 * 1024,
+        pinned=False
+    )
+    state.model_manager.loaded_models["mock"] = lm
 
     client = TestClient(app)
     payload = {
@@ -150,8 +165,18 @@ def benchmark_server_sse(iterations: int = 100) -> float:
         avg_ms = (elapsed / iterations) * 1000.0
         return avg_ms
     finally:
-        state.backend = orig_backend
+        state.model_manager.loaded_models.pop("mock", None)
         state.registry = orig_registry
+
+def benchmark_model_manager_admission(iterations: int = 2000) -> float:
+    from llmhub.server.model_manager import ModelManager
+    mgr = ModelManager()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        _ = mgr.check_admission(required_bytes=4 * 1024 * 1024 * 1024)
+    elapsed = time.perf_counter() - start
+    avg_us = (elapsed / iterations) * 1_000_000.0
+    return avg_us
 
 def run_benchmarks() -> None:
     prof = HardwareDetector.get_profile()
@@ -197,6 +222,10 @@ def run_benchmarks() -> None:
     print("Running FastAPI SSE streaming roundtrip benchmark (100 runs)...")
     sse_ms = benchmark_server_sse(100)
     print(f"  -> Average SSE Streaming Turnaround: {sse_ms:.3f} ms / req")
+
+    print("Running Multi-Model admission control check (2000 runs)...")
+    adm_us = benchmark_model_manager_admission(2000)
+    print(f"  -> Average Admission Check Latency:  {adm_us:.3f} us / evaluation")
 
     print("=" * 70)
     print(" Micro-benchmark passed with zero bottlenecks in Python orchestration path.")

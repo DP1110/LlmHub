@@ -51,6 +51,53 @@ class LLMHubClient:
                 raise RuntimeError(f"Error fetching ps: HTTP {resp.status_code} - {resp.text}")
             return resp.json()
 
+    def pin_model(self, model: str) -> Dict[str, Any]:
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.post(f"{self.base_url}/api/models/{model}/pin")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to pin model: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
+    def unpin_model(self, model: str) -> Dict[str, Any]:
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.post(f"{self.base_url}/api/models/{model}/unpin")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to unpin model: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
+    def load_model(
+        self,
+        model: str,
+        n_ctx: Optional[int] = None,
+        pinned: bool = False,
+        keep_alive: Optional[float] = None
+    ) -> Dict[str, Any]:
+        self.check_connection()
+        params = {}
+        if n_ctx is not None:
+            params["n_ctx"] = n_ctx
+        if pinned:
+            params["pinned"] = "true"
+        if keep_alive is not None:
+            params["keep_alive"] = keep_alive
+
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.post(f"{self.base_url}/api/models/{model}/load", params=params)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to load model: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
+    def unload_model(self, model: str, force: bool = False) -> Dict[str, Any]:
+        self.check_connection()
+        params = {"force": "true"} if force else {}
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.post(f"{self.base_url}/api/models/{model}/unload", params=params)
+            if resp.status_code != 200:
+                raise RuntimeError(f"Failed to unload model: HTTP {resp.status_code} - {resp.text}")
+            return resp.json()
+
     def stream_chat(
         self,
         model: str,
