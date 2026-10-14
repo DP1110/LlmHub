@@ -21,7 +21,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from urllib.parse import unquote
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from llmhub.config import LLMHubConfig, is_termux
@@ -384,6 +384,21 @@ def create_app() -> FastAPI:
                 labels={"method": request.method, "status": str(status_code)},
             )
             current_request_id.reset(token)
+
+    # Built-in Web GUI and Static Files
+    static_dir = Path(__file__).resolve().parent.parent / "static"
+    if static_dir.exists():
+        from fastapi.staticfiles import StaticFiles
+        app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+
+    @app.get("/", response_class=FileResponse)
+    @app.get("/dashboard", response_class=FileResponse)
+    async def get_dashboard() -> Response:
+        """Serve offline-first single-page Web GUI dashboard."""
+        index_file = static_dir / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file), media_type="text/html")
+        return HTMLResponse("<html><body><h1>LLMHub Server Running</h1></body></html>")
 
     @app.get("/metrics")
     async def get_metrics() -> Response:

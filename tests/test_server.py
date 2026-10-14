@@ -293,3 +293,27 @@ def test_llmhub_client_not_running():
     assert not cli.is_server_running()
     with pytest.raises(ServerUnavailableError):
         cli.check_connection()
+
+
+def test_web_gui_and_logo_endpoints(client):
+    # 1. Test GET / serves the Web GUI
+    resp_root = client.get("/")
+    assert resp_root.status_code == 200
+    assert "LLMHub" in resp_root.text
+    assert "<!DOCTYPE html>" in resp_root.text
+
+    # 2. Test GET /dashboard serves the same Web GUI
+    resp_dash = client.get("/dashboard")
+    assert resp_dash.status_code == 200
+    assert "LLMHub" in resp_dash.text
+
+    # 3. Test GET /static/logo.svg
+    resp_svg = client.get("/static/logo.svg")
+    assert resp_svg.status_code == 200
+    assert "svg" in resp_svg.text
+
+    # 4. Test GET /static/logo.jpg
+    resp_jpg = client.get("/static/logo.jpg")
+    assert resp_jpg.status_code == 200
+    assert len(resp_jpg.content) > 1000
+

@@ -157,6 +157,9 @@ class APIKeyAuthenticator:
 
         self.exempt_localhost = exempt_localhost
         self.exempt_paths: Set[str] = exempt_paths or {
+            "/",
+            "/dashboard",
+            "/favicon.ico",
             "/healthz",
             "/metrics",
             "/docs",
@@ -169,7 +172,11 @@ class APIKeyAuthenticator:
         }
 
     def is_exempt_path(self, path: str) -> bool:
-        return path in self.exempt_paths
+        if path in self.exempt_paths:
+            return True
+        if path.startswith("/static/"):
+            return True
+        return False
 
     def is_localhost(self, client_host: Optional[str]) -> bool:
         if not client_host:
