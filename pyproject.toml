@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmhub"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline-first, Ollama-like concurrent GGUF inference platform"
 readme = "README.md"
 authors = [{ name = "Principal Systems Engineer" }]
@@ -26,3 +26,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0"
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

@@ -16,6 +16,9 @@ import httpx
 from llmhub.config import LLMHubConfig
 from llmhub.core.gguf_parser import GGUFParser
 from llmhub.core.registry import ModelRegistry, ModelRecord
+from llmhub.hardware.detector import HardwareDetector
+from llmhub.hardware.manifest import ModelManifest
+from llmhub.hardware.tuner import AutoTuner
 
 class DownloadError(Exception):
     pass
@@ -216,28 +219,28 @@ class HFDownloader:
         # Parse GGUF metadata
         metadata = GGUFParser.parse_file(model_path)
 
-        # Write manifest.json
-        manifest = {
-            "org": org,
-            "repo": repo,
-            "quant": quant,
-            "filename": final_filename,
-            "url": url,
-            "sha256": digest,
-            "size_bytes": model_path.stat().st_size,
-            "architecture": metadata.architecture,
-            "model_name": metadata.model_name,
-            "block_count": metadata.block_count,
-            "head_count": metadata.head_count,
-            "head_count_kv": metadata.head_count_kv,
-            "head_dim": metadata.head_dim,
-            "context_length": metadata.context_length,
-            "embedding_length": metadata.embedding_length,
-            "has_chat_template": metadata.chat_template is not None,
-            "chat_template": metadata.chat_template,
-        }
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
+        # Generate and save standardized ModelManifest with hardware profiling
+        threads, _ = AutoTuner.select_threads()
+        actual_free_ram = HardwareDetector.get_profile().free_ram_bytes
+        rec_ctx, _, _ = AutoTuner.calculate_safe_context(
+            weights_bytes=model_path.stat().st_size,
+            n_layers=metadata.block_count,
+            n_kv_heads=metadata.head_count_kv,
+            head_dim=metadata.head_dim,
+            ctx_max=metadata.context_length,
+            free_ram_bytes=actual_free_ram
+        )
+        manifest = ModelManifest.create_from_gguf(
+            org=org,
+            name=repo,
+            quant=quant,
+            file_path=model_path,
+            sha256=digest,
+            metadata=metadata,
+            recommended_threads=threads,
+            recommended_ctx=rec_ctx
+        )
+        manifest.save(manifest_path)
 
         # Register in SQLite DB
         record = self.registry.register_model(

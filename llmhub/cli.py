@@ -22,6 +22,8 @@ from llmhub.core.registry import ModelRegistry
 from llmhub.core.runner import ModelRunner
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
 from llmhub.utils.platform import get_hardware_profile
+from llmhub.hardware.detector import HardwareDetector
+from llmhub.hardware.tuner import AutoTuner
 
 def cmd_pull(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -198,6 +200,112 @@ def cmd_rm(args: argparse.Namespace) -> None:
         sys.stderr.write(f"[ERROR] Failed to delete {model_dir}: {e}\n")
         sys.exit(1)
 
+def cmd_hardware(args: argparse.Namespace) -> None:
+    prof = HardwareDetector.get_profile()
+    cpu = prof.cpu
+    gpu = prof.gpu
+
+    print("=" * 75)
+    print(" LLMHUB SYSTEM HARDWARE PROFILER")
+    print("=" * 75)
+    print(f" Operating System:      {prof.os_name} ({prof.arch})")
+    print(f" Environment Mode:      {'Android Termux' if prof.is_termux else 'Desktop / Server'}")
+    print(f" User Privileges:       {'Root / Administrator' if not prof.is_non_root else 'Non-Root (Restricted)'}")
+    print("-" * 75)
+    print(f" CPU Architecture:      {cpu.arch}")
+    print(f" Physical CPU Cores:    {cpu.physical_cores}")
+    print(f" Logical Threads (SMT): {cpu.logical_cores}")
+    if cpu.is_hybrid_big_little:
+        print(f" Core Architecture:     Hybrid Big.LITTLE ({cpu.performance_cores} Performance + {cpu.efficiency_cores} Efficiency)")
+    else:
+        print(f" Core Architecture:     Homogeneous Symmetric Multi-Processing")
+    print(f" SIMD Vector Sets:      {', '.join(cpu.simd_extensions) if cpu.simd_extensions else 'None / Standard'}")
+    print("-" * 75)
+    print(f" Total System RAM:      {prof.total_ram_bytes / (1024**3):.2f} GB ({prof.total_ram_bytes / (1024**2):.0f} MB)")
+    print(f" Available Free RAM:    {prof.free_ram_bytes / (1024**3):.2f} GB ({prof.free_ram_bytes / (1024**2):.0f} MB)")
+    print("-" * 75)
+    print(f" Accelerator / GPU:     {gpu.name} (Backend: {gpu.backend.upper()})")
+    if gpu.is_available:
+        print(f" VRAM Available:        {gpu.vram_bytes / (1024**2):.0f} MB ({gpu.device_count} devices)")
+    print("-" * 75)
+    print(f" Auto-Tuned Threads:    {prof.suggested_threads} worker threads")
+    threads, rationale = AutoTuner.select_threads(prof)
+    print(f" Threading Rationale:   {rationale}")
+
+    if prof.warnings:
+        print("-" * 75)
+        print(" Platform Flags & Heuristics:")
+        for w in prof.warnings:
+            print(f"   [!] {w}")
+    print("=" * 75 + "\n")
+
+def cmd_plan(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    registry = ModelRegistry(config.db_path)
+    record = registry.find_model(args.model)
+
+    if not record:
+        candidate_path = Path(args.model).resolve()
+        if candidate_path.is_file() and candidate_path.suffix.lower() == ".gguf":
+            metadata = GGUFParser.parse_file(candidate_path)
+            weights_bytes = candidate_path.stat().st_size
+            tag = candidate_path.stem
+            layers = metadata.block_count
+            kv_heads = metadata.head_count_kv
+            head_dim = metadata.head_dim
+            ctx_max = metadata.context_length
+        else:
+            sys.stderr.write(f"[ERROR] Model '{args.model}' not found in registry. Pull it first with:\n")
+            sys.stderr.write(f"  llmhub pull {args.model}\n")
+            sys.exit(1)
+    else:
+        model_path = Path(record.file_path)
+        weights_bytes = record.size_bytes
+        tag = record.tag
+        layers = record.n_layers
+        kv_heads = record.n_kv_heads
+        head_dim = record.head_dim
+        ctx_max = record.ctx_max
+
+    prof = HardwareDetector.get_profile()
+    plan = AutoTuner.generate_tuning_plan(
+        model_tag=tag,
+        weights_bytes=weights_bytes,
+        n_layers=layers,
+        n_kv_heads=kv_heads,
+        head_dim=head_dim,
+        ctx_max=ctx_max,
+        profile=prof
+    )
+
+    print("=" * 75)
+    print(f" LLMHUB HARDWARE AUTO-TUNING PLAN: {plan.model_tag}")
+    print("=" * 75)
+    print(f" Status:                {'SAFE TO EXECUTE' if plan.is_safe else 'MEMORY PRESSURE WARNING'}")
+    print(f" Optimal Threads:       {plan.recommended_threads} ({plan.thread_rationale})")
+    print(f" Recommended Context:   {plan.recommended_ctx} tokens")
+    print(f" Max Safe Context:      {plan.max_safe_ctx} tokens (Model Max: {ctx_max})")
+    print(f" Weights Footprint:     {plan.memory_breakdown_mb['weights_mb']:.1f} MB")
+    print(f" KV Cache ({plan.recommended_ctx} ctx):   {plan.memory_breakdown_mb['kv_cache_mb']:.1f} MB")
+    print(f" Total Allocation:      {plan.memory_breakdown_mb['total_mb']:.1f} MB")
+    print(f" Free RAM After Load:   {plan.free_ram_after_load_mb:.1f} MB")
+    
+    if plan.warnings:
+        print("-" * 75)
+        print(" Notices & Warnings:")
+        for w in plan.warnings:
+            print(f"   [!] {w}")
+
+    # Estimate parameter scale from weights size (Q4 ~0.55 GB per 1B params)
+    est_params_b = weights_bytes / (0.55 * 1024 * 1024 * 1024)
+    print("\n--- Quantization Suggestions for ~" + f"{est_params_b:.1f}B Scale ---")
+    suggestions = AutoTuner.evaluate_quant_suggestions(est_params_b, prof)
+    print(f"{'QUANT':<8} {'BITS/W':<8} {'WEIGHTS':<10} {'TOTAL RAM':<12} {'COMPATIBILITY':<30}")
+    print("-" * 75)
+    for s in suggestions:
+        print(f"{s.quant:<8} {s.bits_per_weight:<8.1f} {s.weights_size_gb:<10.2f} GB {s.total_ram_needed_gb:<10.2f} GB {s.status:<30}")
+    print("=" * 75 + "\n")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmhub",
@@ -229,6 +337,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_show = subparsers.add_parser("show", help="Show model architecture, metadata, and memory breakdown")
     p_show.add_argument("model", help="Model name or spec")
     p_show.set_defaults(func=cmd_show)
+
+    # hardware
+    p_hw = subparsers.add_parser("hardware", help="Inspect CPU topology, SIMD extensions, RAM, and GPU")
+    p_hw.set_defaults(func=cmd_hardware)
+
+    # plan
+    p_plan = subparsers.add_parser("plan", help="Auto-tune threads, context, and evaluate quantization for a model")
+    p_plan.add_argument("model", help="Model name or spec")
+    p_plan.set_defaults(func=cmd_plan)
 
     # rm
     p_rm = subparsers.add_parser("rm", help="Remove model from local storage and registry")

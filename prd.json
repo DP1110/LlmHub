@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-1-single-runner",
+  "branchName": "phase-2-registry-hardware",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -98,6 +98,54 @@
         "Accurate KV cache byte formulas: 2 * n_layers * n_kv_heads * head_dim * ctx * element_size",
         "DDR memory bandwidth bound calculation: max_tok_s = MemBandwidth / WeightsSize",
         "Output explanation of memory-bandwidth bound decode vs compute-bound prefill"
+      ]
+    },
+    {
+      "id": "US-008",
+      "title": "Deep Hardware Detection & SIMD/GPU Probing",
+      "phase": 2,
+      "description": "Inspect CPU topology (physical vs logical cores, Big.LITTLE clusters), total & free RAM, SIMD extensions (AVX2, AVX512, NEON, SVE), and GPU acceleration presence across Windows, Linux, macOS, and Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Accurately isolate physical cores from SMT hyperthreads across all OS",
+        "Detect ARM64 Big.LITTLE performance vs efficiency clusters",
+        "Detect SIMD vector instruction sets: AVX, AVX2, AVX512, FMA, NEON, SVE",
+        "Probe GPU accelerators (NVIDIA CUDA, Apple Metal, Vulkan) with safe fallback"
+      ]
+    },
+    {
+      "id": "US-009",
+      "title": "Standardized Model Manifest Schema & Generator",
+      "phase": 2,
+      "description": "Generate and validate manifest.json per model containing repo, quant, size, sha256, n_layers, kv_heads, head_dim, ctx_max, template, and hardware profiles.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Structured ModelManifest dataclass with strict JSON schema serialization",
+        "Extracts all architecture parameters directly from GGUF metadata",
+        "Stores hardware profile requirements (min RAM, recommended threads, theoretical tok/s)"
+      ]
+    },
+    {
+      "id": "US-010",
+      "title": "Heuristic Auto-Tuning Engine",
+      "phase": 2,
+      "description": "Auto-select optimal threads (physical performance cores, strictly avoiding logical hyperthreads), dynamic context size based on free RAM safety margins, and quantization recommendations.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Thread selector strictly selects physical performance cores",
+        "Context selector calculates max safe power-of-2 context fitting within free RAM safety margin",
+        "Quantization recommender evaluates Q2_K through Q8_0 across 0.5B to 70B parameter models based on system RAM"
+      ]
+    },
+    {
+      "id": "US-011",
+      "title": "CLI Hardware & Auto-Tuning Inspection",
+      "phase": 2,
+      "description": "Provide 'llmhub hardware' and 'llmhub plan <model>' CLI commands to inspect hardware topology and preview auto-tuning decisions.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "llmhub hardware outputs detailed CPU topology, RAM, SIMD, and Termux constraints",
+        "llmhub plan <model> computes recommended threads, context window, and memory margins for a specific model"
       ]
     }
   ]
