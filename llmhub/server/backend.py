@@ -76,7 +76,10 @@ class Backend(ABC):
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        stop: Optional[List[str]] = None
+        stop: Optional[List[str]] = None,
+        prompt_tokens: Optional[List[int]] = None,
+        seq_id: Optional[int] = None,
+        **kwargs: Any,
     ) -> SessionState:
         """Initialize an inference session with prompt tokenization and KV cache reservation."""
         pass
@@ -112,4 +115,9 @@ class Backend(ABC):
     def set_n_threads(self, n_threads: int) -> None:
         """Dynamically update CPU execution threads for active context."""
         pass
+
+    def tokenize(self, text: str) -> List[int]:
+        """Convert string prompt into integer token IDs."""
+        return list(text.encode("utf-8"))
+
 

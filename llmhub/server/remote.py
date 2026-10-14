@@ -57,7 +57,10 @@ class RemoteBackend(Backend):
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        stop: Optional[List[str]] = None
+        stop: Optional[List[str]] = None,
+        prompt_tokens: Optional[List[int]] = None,
+        seq_id: Optional[int] = None,
+        **kwargs: Any,
     ) -> SessionState:
         if not self._is_loaded:
             raise RuntimeError("Remote backend is not connected.")

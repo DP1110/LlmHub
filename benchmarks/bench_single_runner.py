@@ -261,6 +261,115 @@ def benchmark_scheduler_modes_comparison() -> None:
 
     print("=" * 80)
 
+def benchmark_continuous_batching_scaling() -> None:
+    from llmhub.batch.engine import BatchSlotState, ContinuousBatchEngine
+    from llmhub.batch.prefix_cache import PrefixCache
+    from llmhub.server.backend import Backend, DecodeResult, SessionState
+
+    class BenchmarkMockBackend(Backend):
+        def __init__(self, model_name: str = "bench-model"):
+            self.model_name = model_name
+            self.sessions = {}
+        def is_loaded(self): return True
+        def load(self, *a, **k): pass
+        def unload(self): self.sessions.clear()
+        def tokenize(self, text: str): return [ord(c) for c in text]
+        def new_session(self, session_id, prompt, max_tokens=128, **kwargs):
+            tokens = kwargs.get("prompt_tokens") or [1, 2, 3, 4]
+            sess = SessionState(session_id, self.model_name, prompt, list(tokens), max_tokens=max_tokens)
+            self.sessions[session_id] = sess
+            return sess
+        def prefill_chunk(self, session_id, max_tokens_chunk=256):
+            sess = self.sessions.get(session_id)
+            if not sess: return 0, True
+            rem = len(sess.prompt_tokens) - sess.prefill_offset
+            chunk = min(max_tokens_chunk, max(0, rem))
+            sess.prefill_offset += chunk
+            done = sess.prefill_offset >= len(sess.prompt_tokens)
+            return chunk, done
+        def decode_step(self, session_id, n_tokens=1):
+            sess = self.sessions.get(session_id)
+            if not sess: return DecodeResult(session_id, [], [], True)
+            toks = [len(sess.generated_tokens) + i for i in range(n_tokens)]
+            sess.generated_tokens.extend(toks)
+            done = len(sess.generated_tokens) >= sess.max_tokens
+            return DecodeResult(session_id, toks, [f" t{t}" for t in toks], done)
+        def get_session(self, session_id): return self.sessions.get(session_id)
+        def close_session(self, session_id): self.sessions.pop(session_id, None)
+        def get_info(self): return {}
+
+    print("\n" + "=" * 80)
+    print(" PHASE 6 CONTINUOUS BATCHING: THROUGHPUT SCALING (BATCH SIZES B=1, 2, 4)")
+    print("=" * 80)
+    print(f"{'Batch Size (B)':<15} | {'Steps Executed':<16} | {'Tokens / Sec':<14} | {'Step Latency (us)':<18} | {'Speedup':<10}")
+    print("-" * 80)
+
+    base_tok_s = 0.0
+    for b_size in [1, 2, 4]:
+        backend = BenchmarkMockBackend()
+        engine = ContinuousBatchEngine(model_tag="bench-model", max_slots=b_size)
+
+        for i in range(b_size):
+            engine.allocate_slot(
+                session_id=f"sess_{i}",
+                prompt="System prompt test instructions",
+                prompt_tokens=[10, 20, 30, 40],
+                max_tokens=4000,
+            )
+            slot = engine.get_slot_by_session(f"sess_{i}")
+            if slot:
+                slot.state = BatchSlotState.DECODING
+
+        # Warmup
+        for _ in range(50):
+            engine.step_batch(backend, default_quantum=4)
+
+        n_steps = 500
+        start = time.perf_counter()
+        for _ in range(n_steps):
+            res = engine.step_batch(backend, default_quantum=4)
+        elapsed = time.perf_counter() - start
+
+        total_tokens = n_steps * (b_size * 4)
+        tok_s = total_tokens / elapsed if elapsed > 0 else 0.0
+        step_us = (elapsed / n_steps) * 1_000_000.0
+
+        if b_size == 1:
+            base_tok_s = tok_s
+            speedup = 1.00
+        else:
+            speedup = tok_s / base_tok_s if base_tok_s > 0 else 1.00
+
+        print(f"{b_size:<15} | {n_steps:<16} | {tok_s:>12.1f}   | {step_us:>16.2f}  | {speedup:>8.2f}x")
+
+    print("-" * 80)
+    print(" CONTINUOUS BATCHING PREFIX / PROMPT CACHING EFFICIENCY")
+    print("-" * 80)
+
+    cache = PrefixCache(max_cached_tokens=16384, min_prefix_tokens=8)
+    common_system_prompt = [i for i in range(1, 129)]  # 128 tokens
+    cache.insert_prefix("bench-model", common_system_prompt)
+
+    n_queries = 2000
+    start = time.perf_counter()
+    for q_idx in range(n_queries):
+        if q_idx % 5 != 0:  # 80% hit
+            query_tokens = common_system_prompt + [1000 + q_idx, 1001 + q_idx]
+        else:  # 20% miss
+            query_tokens = [5000 + q_idx + j for j in range(32)]
+        cache.find_longest_prefix("bench-model", query_tokens)
+    elapsed = time.perf_counter() - start
+
+    lookup_us = (elapsed / n_queries) * 1_000_000.0
+    hit_rate = (cache.cache_hits / cache.total_queries) * 100.0 if cache.total_queries > 0 else 0.0
+
+    print(f" Prefix Cache Queries:       {cache.total_queries}")
+    print(f" Cache Hit Rate:             {hit_rate:.1f}% ({cache.cache_hits} hits / {cache.total_queries} queries)")
+    print(f" Prefill Tokens Saved:       {cache.tokens_saved:,} tokens")
+    print(f" Average Hash & Lookup Time: {lookup_us:.3f} us / query")
+    print(f" Prefill Redundancy Avoided: {cache.tokens_saved / (cache.total_queries * 128) * 100:.1f}% of total input volume")
+    print("=" * 80)
+
 def run_benchmarks() -> None:
     prof = HardwareDetector.get_profile()
     cpu = prof.cpu
@@ -319,6 +428,9 @@ def run_benchmarks() -> None:
 
     # Phase 5 Threading Modes Comparison
     benchmark_scheduler_modes_comparison()
+
+    # Phase 6 Continuous Batching Throughput & Prefix Caching Scaling
+    benchmark_continuous_batching_scaling()
 
 if __name__ == "__main__":
     run_benchmarks()

@@ -51,6 +51,12 @@ class LoadedModel:
     last_active_time: float = field(default_factory=time.monotonic)
     active_sessions: int = 0
     inference_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    batch_engine: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        if self.batch_engine is None:
+            from llmhub.batch.engine import ContinuousBatchEngine
+            self.batch_engine = ContinuousBatchEngine(model_tag=self.tag, max_slots=4)
 
     @property
     def is_idle(self) -> bool:
@@ -87,9 +93,12 @@ class ModelManager:
         self._reaper_task: Optional[asyncio.Task] = None
 
     def get_free_ram_bytes(self) -> int:
-        """Query system for currently available unallocated physical RAM (fast-path via psutil)."""
-        import psutil
-        return int(psutil.virtual_memory().available)
+        """Query system for currently available unallocated physical RAM (fast-path via psutil with fallback)."""
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available)
+        except Exception:
+            return HardwareDetector.get_profile().free_ram_bytes
 
     def calculate_model_memory(
         self,

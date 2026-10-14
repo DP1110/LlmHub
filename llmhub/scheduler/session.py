@@ -80,17 +80,22 @@ class SchedSession:
     deficit: float = 0.0
     phase: SessionPhase = SessionPhase.WAITING
     metrics: SessionMetrics = field(default_factory=SessionMetrics)
-    token_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    token_queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=512))
     cancelled: bool = False
     stop_reason: Optional[str] = None
     error: Optional[str] = None
     generated_text: str = ""
+    prompt_tokens: Optional[List[int]] = None
+    slot_id: Optional[int] = None
+    admitted: bool = False
 
     def __post_init__(self) -> None:
         self.weight = max(0.01, float(self.weight))
         self.priority = max(1, min(10, int(self.priority)))
         if self.token_queue is None:
-            self.token_queue = asyncio.Queue(maxsize=256)
+            self.token_queue = asyncio.Queue(maxsize=512)
+        if self.prompt_tokens is None:
+            self.prompt_tokens = list(self.prompt.encode("utf-8")) if self.prompt else []
 
     @property
     def is_done(self) -> bool:

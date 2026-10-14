@@ -79,7 +79,10 @@ class LlamaCppBackend(Backend):
         max_tokens: int = 512,
         temperature: float = 0.7,
         top_p: float = 0.9,
-        stop: Optional[List[str]] = None
+        stop: Optional[List[str]] = None,
+        prompt_tokens: Optional[List[int]] = None,
+        seq_id: Optional[int] = None,
+        **kwargs: Any,
     ) -> SessionState:
         if not self.llm:
             raise RuntimeError("Backend model is not loaded.")
@@ -87,9 +90,12 @@ class LlamaCppBackend(Backend):
         if stop is None:
             stop = ["<|im_end|>", "<|eot_id|>", "</s>", "\nUser:", "<|end_of_text|>"]
 
-        # Tokenize prompt using llama.cpp
-        prompt_bytes = prompt.encode("utf-8")
-        raw_tokens = self.llm.tokenize(prompt_bytes, add_bos=True)
+        # Use pre-tokenized tokens if provided, else tokenize with llama.cpp
+        if prompt_tokens is not None:
+            raw_tokens = list(prompt_tokens)
+        else:
+            prompt_bytes = prompt.encode("utf-8")
+            raw_tokens = list(self.llm.tokenize(prompt_bytes, add_bos=True))
 
         session = SessionState(
             session_id=session_id,
@@ -203,6 +209,14 @@ class LlamaCppBackend(Backend):
             decode_tok_s=decode_tok_s,
             total_tokens_generated=gen_count
         )
+
+    def tokenize(self, text: str) -> List[int]:
+        if self.llm is not None:
+            try:
+                return list(self.llm.tokenize(text.encode("utf-8"), add_bos=True))
+            except Exception:
+                pass
+        return list(text.encode("utf-8"))
 
     def set_n_threads(self, n_threads: int) -> None:
         self.n_threads = max(1, n_threads)

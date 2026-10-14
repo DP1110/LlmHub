@@ -142,7 +142,29 @@ def create_app() -> FastAPI:
     async def get_ps() -> Dict[str, Any]:
         info = state.model_manager.get_ps_info()
         info["scheduler"] = state.scheduler.get_telemetry()
+        batch_summary = {}
+        for tag, lm in state.model_manager.loaded_models.items():
+            if hasattr(lm, "batch_engine") and lm.batch_engine:
+                st = lm.batch_engine.get_status()
+                batch_summary[tag] = {
+                    "max_slots": st["max_slots"],
+                    "active_slots": st["active_slots"],
+                    "utilization_pct": st["utilization_pct"],
+                    "prefix_cache_hit_rate": st["prefix_cache"]["hit_rate_pct"],
+                }
+        info["batch_summary"] = batch_summary
         return info
+
+    @app.get("/api/batch")
+    async def get_batch_status() -> Dict[str, Any]:
+        batch_status = {}
+        for tag, lm in state.model_manager.loaded_models.items():
+            if hasattr(lm, "batch_engine") and lm.batch_engine:
+                batch_status[tag] = lm.batch_engine.get_status()
+        return {
+            "loaded_models_count": len(state.model_manager.loaded_models),
+            "batch_engines": batch_status,
+        }
 
     @app.get("/api/scheduler")
     async def get_scheduler_telemetry() -> Dict[str, Any]:

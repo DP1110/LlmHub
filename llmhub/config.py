@@ -69,6 +69,11 @@ class LLMHubConfig:
                 "prefill_chunk_size": 256,
                 "threading_mode": "time-slice",  # time-slice | partition | hybrid
             },
+            "batch": {
+                "default_max_slots": 4,
+                "enable_continuous_batching": True,
+                "max_cached_tokens": 32768,
+            },
             "storage": {
                 "models_dir": str(self.models_dir),
                 "db_path": str(self.db_path),

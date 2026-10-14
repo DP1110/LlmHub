@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.4.0",
+  "version": "0.6.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-4-multi-model-manager",
+  "branchName": "phase-6-continuous-batching",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -332,6 +332,83 @@
         "Track queue wait time, TTFT distribution, and tokens/sec per session",
         "Measure context-switch overhead across session and model switches",
         "Benchmark comparing modes (a)/(b)/(c) across 1, 2, and 4 concurrent models"
+      ]
+    },
+    {
+      "id": "US-027",
+      "title": "Parallel Sequence Slots & Shared Weights Context",
+      "phase": 6,
+      "description": "Implement parallel sequence slots per loaded model with shared weight tensors and isolated per-slot KV caches.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Model execution context supports N parallel sequence slots (default 4)",
+        "Zero weights duplication across concurrent slots",
+        "Per-slot KV cache offset reservation and sequence tracking",
+        "Slot allocation and retirement lifecycle"
+      ]
+    },
+    {
+      "id": "US-028",
+      "title": "Continuous Iteration-Level Batching Engine",
+      "phase": 6,
+      "description": "Implement continuous batching where sessions dynamically join free slots and retire upon completion at token granularity.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Iteration-level batch execution stepping all active slots simultaneously",
+        "Dynamic admission of waiting sessions as slots become free",
+        "Retirement of finished sessions without interrupting ongoing slots",
+        "Amortized memory bandwidth yielding multi-session throughput scaling"
+      ]
+    },
+    {
+      "id": "US-029",
+      "title": "Radix / Exact Prefix & Prompt Caching",
+      "phase": 6,
+      "description": "Build high-speed LRU prefix cache to detect shared prompt sequences, avoiding redundant KV prefill computation.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Token prefix tree / LRU cache storing token sequences and KV state offsets",
+        "Longest common prefix matching for incoming prompts",
+        "Skip prefill evaluation for matched prefix tokens",
+        "Track prefix cache hits, misses, and saved prefill tokens"
+      ]
+    },
+    {
+      "id": "US-030",
+      "title": "Scheduler Integration: Model-Level Batch Stepping",
+      "phase": 6,
+      "description": "Integrate ContinuousBatchEngine with TokenRoundRobinScheduler so the scheduler selects model turns and dispatches continuous batches.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Scheduler groups runnable sessions by target model and populates active slots",
+        "Execute batch step for chosen model turn within quantum boundary",
+        "Preserve Deficit Round-Robin fairness across different models",
+        "Token deltas stream seamlessly back to individual session token queues"
+      ]
+    },
+    {
+      "id": "US-031",
+      "title": "Continuous Batching & Cache Telemetry",
+      "phase": 6,
+      "description": "Expose batch engine slot occupancy, active batch size, prefix cache hit rate, and saved compute metrics in API endpoints.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Endpoint /api/ps includes per-model batch slot utilization and prefix cache metrics",
+        "Endpoint /api/batch for real-time inspection of slot states and sequence positions",
+        "Track prefix cache hit ratio and compute speedup"
+      ]
+    },
+    {
+      "id": "US-032",
+      "title": "Continuous Batching Tests & Throughput Scaling Benchmark",
+      "phase": 6,
+      "description": "Comprehensive test suite for parallel slots, continuous admission/retirement, prefix caching, and benchmark comparing batch sizes 1, 2, 4.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Tests verifying parallel slot isolation and correctness",
+        "Tests verifying dynamic joining and leaving in continuous batching",
+        "Tests verifying prefix cache hit and token saving",
+        "Benchmark measuring throughput scaling vs batch size B=1, 2, 4"
       ]
     }
   ]

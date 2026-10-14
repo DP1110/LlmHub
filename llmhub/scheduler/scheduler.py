@@ -34,11 +34,13 @@ class TokenRoundRobinScheduler:
         default_chunk_size: int = 256,
         max_queue_depth: int = 128,
         threading_mode: ThreadingMode = ThreadingMode.HYBRID,
+        enable_continuous_batching: bool = True,
     ):
         self.model_manager = model_manager
         self.default_quantum = default_quantum
         self.default_chunk_size = default_chunk_size
         self.max_queue_depth = max_queue_depth
+        self.enable_continuous_batching = enable_continuous_batching
         self.threading_strategy = ThreadingStrategy(mode=threading_mode)
         self.policy = DeficitRoundRobinPolicy(default_quantum=default_quantum)
 
@@ -58,12 +60,18 @@ class TokenRoundRobinScheduler:
         """Safely release backend session KV cache, decrement active session counters, and prune queue."""
         loaded = self.model_manager.get_model(session.model_tag)
         if loaded:
-            try:
-                async with loaded.inference_lock:
+            async with loaded.inference_lock:
+                if hasattr(loaded, "batch_engine") and loaded.batch_engine:
+                    loaded.batch_engine.release_session(session.session_id)
+                try:
                     await asyncio.to_thread(loaded.backend.close_session, session.session_id)
-            except Exception:
-                pass
-            loaded.active_sessions = max(0, loaded.active_sessions - 1)
+                except Exception:
+                    pass
+
+            if session.admitted:
+                loaded.active_sessions = max(0, loaded.active_sessions - 1)
+                session.admitted = False
+            session.slot_id = None
 
         async with self.lock:
             if session in self.runnable_queue:
@@ -71,7 +79,190 @@ class TokenRoundRobinScheduler:
             if session not in self.completed_sessions:
                 self.completed_sessions.append(session)
 
+    async def _step_continuous_batch(self, loaded_model: LoadedModel, primary_session: SchedSession) -> bool:
+        """Step active slots in parallel for loaded_model using continuous batching."""
+        engine = loaded_model.batch_engine
+        assert engine is not None
+
+        from llmhub.batch.engine import BatchSlotState
+
+        # 1. Gather all runnable sessions targeting this model
+        async with self.lock:
+            model_sessions = [
+                s for s in self.runnable_queue
+                if s.model_tag == loaded_model.tag and not s.is_done and not s.cancelled
+            ]
+
+        if not model_sessions:
+            return False
+
+        # 2. Admit waiting sessions into free slots in batch_engine
+        for s in model_sessions:
+            slot = engine.get_slot_by_session(s.session_id)
+            if slot is None:
+                free_slot = engine.find_free_slot()
+                if free_slot is not None:
+                    if not s.prompt_tokens and s.prompt:
+                        try:
+                            s.prompt_tokens = loaded_model.backend.tokenize(s.prompt)
+                        except Exception:
+                            s.prompt_tokens = list(s.prompt.encode("utf-8"))
+
+                    allocated = engine.allocate_slot(
+                        session_id=s.session_id,
+                        prompt=s.prompt,
+                        prompt_tokens=s.prompt_tokens or [],
+                        max_tokens=s.max_tokens,
+                        temperature=s.temperature,
+                        top_p=s.top_p,
+                        stop=s.stop,
+                    )
+                    if allocated:
+                        s.slot_id = allocated.slot_id
+                        s.metrics.start_time = s.metrics.start_time or time.monotonic()
+                        s.admitted = True
+                        loaded_model.active_sessions += 1
+                        loaded_model.last_active_time = time.monotonic()
+
+        # 3. Execute batch step on background worker thread
+        t_start = time.perf_counter()
+        try:
+            async with loaded_model.inference_lock:
+                batch_res = await asyncio.to_thread(
+                    engine.step_batch,
+                    loaded_model.backend,
+                    primary_session.quantum_tokens or self.default_quantum,
+                    primary_session.chunk_size or self.default_chunk_size,
+                )
+        except Exception as e:
+            for s in model_sessions:
+                s.phase = SessionPhase.FAILED
+                s.error = str(e)
+                s.metrics.finish_time = time.monotonic()
+                await s.token_queue.put({"done": True, "error": str(e)})
+                await self._cleanup_session_resources(s)
+            return True
+
+        now = time.monotonic()
+        cpu_duration_ms = (time.perf_counter() - t_start) * 1000.0
+        loaded_model.last_active_time = now
+
+        # Update initial phase transition for newly admitted prefilling slots
+        for s in model_sessions:
+            slot = engine.get_slot_by_session(s.session_id)
+            if slot and slot.state == BatchSlotState.PREFILLING and s.phase == SessionPhase.WAITING:
+                s.phase = SessionPhase.PREFILLING
+
+        # 4. Dispatch prefill completions
+        for sid in batch_res.prefill_completed_sessions:
+            s = next((x for x in model_sessions if x.session_id == sid), None)
+            if s:
+                s.phase = SessionPhase.DECODING
+                s.metrics.prefill_tokens = batch_res.prefilled_tokens_per_session.get(sid, len(s.prompt_tokens or []))
+                s.metrics.total_cpu_time_ms += cpu_duration_ms
+                try:
+                    s.token_queue.put_nowait({
+                        "type": "prefill_complete",
+                        "prefilled_tokens": s.metrics.prefill_tokens
+                    })
+                except asyncio.QueueFull:
+                    pass
+
+        # 5. Dispatch generated token deltas to active decoding sessions
+        for sid, deltas in batch_res.session_deltas.items():
+            s = next((x for x in model_sessions if x.session_id == sid), None)
+            if s:
+                s.phase = SessionPhase.DECODING
+                if s.metrics.first_token_time is None and len(deltas) > 0:
+                    s.metrics.first_token_time = now
+                s.metrics.last_quantum_time = now
+                s.metrics.generated_tokens += len(deltas)
+                s.metrics.quanta_executed += 1
+                s.metrics.total_cpu_time_ms += cpu_duration_ms
+                s.deficit -= len(deltas)
+                self.total_quanta_executed += 1
+                self.total_tokens_generated += len(deltas)
+
+                for delta in deltas:
+                    s.generated_text += delta
+                    try:
+                        s.token_queue.put_nowait({
+                            "delta": delta,
+                            "done": False,
+                            "session_id": sid,
+                        })
+                    except asyncio.QueueFull:
+                        logger.warning("Session %s token_queue is full; client backpressure triggered", sid)
+
+        # 6. Dispatch completed sessions
+        for sid in batch_res.completed_sessions:
+            s = next((x for x in model_sessions if x.session_id == sid), None)
+            if s:
+                comp = batch_res.session_completions.get(sid, {})
+                s.phase = SessionPhase.COMPLETED
+                s.stop_reason = comp.get("stop_reason", "stop")
+                s.metrics.finish_time = now
+
+                completion_pkt = {
+                    "done": True,
+                    "stop_reason": s.stop_reason,
+                    "text": s.generated_text,
+                    "usage": {
+                        "prompt_tokens": comp.get("prompt_tokens", len(s.prompt_tokens or [])),
+                        "prefix_matched_tokens": comp.get("prefix_matched_tokens", 0),
+                        "completion_tokens": s.metrics.generated_tokens,
+                        "total_tokens": comp.get("total_tokens", len(s.prompt_tokens or []) + s.metrics.generated_tokens),
+                        "ttft_ms": round(s.metrics.ttft_ms or 0.0, 2),
+                        "decode_tok_s": round(s.metrics.decode_tok_s, 2),
+                        "quanta": s.metrics.quanta_executed,
+                        "context_switches": s.metrics.context_switches,
+                    }
+                }
+                try:
+                    s.token_queue.put_nowait(completion_pkt)
+                except asyncio.QueueFull:
+                    try:
+                        s.token_queue.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        s.token_queue.put_nowait(completion_pkt)
+                    except Exception:
+                        pass
+
+                await self._cleanup_session_resources(s)
+
+        # 6b. Dispatch isolated slot failures without impacting other active sessions
+        for sid, err_msg in batch_res.failed_sessions.items():
+            s = next((x for x in model_sessions if x.session_id == sid), None)
+            if s and not s.is_done:
+                s.phase = SessionPhase.FAILED
+                s.error = err_msg
+                s.metrics.finish_time = now
+                try:
+                    s.token_queue.put_nowait({"done": True, "error": err_msg})
+                except Exception:
+                    pass
+                await self._cleanup_session_resources(s)
+
+        # 7. Update status for prefilling sessions that did not complete prefill yet
+        for s in model_sessions:
+            slot = engine.get_slot_by_session(s.session_id)
+            if slot and slot.state == BatchSlotState.PREFILLING and s.phase != SessionPhase.DECODING and not s.is_done:
+                s.phase = SessionPhase.PREFILLING
+                s.metrics.prefill_tokens = slot.prefill_offset
+
+        # 8. Rotate sessions that participated in this turn
+        async with self.lock:
+            for s in model_sessions:
+                if s in self.runnable_queue and not s.is_done:
+                    self.runnable_queue.remove(s)
+                    self.runnable_queue.append(s)
+
+        return True
+
     async def submit_session(self, session: SchedSession) -> None:
+
         """Submit a new session into the runnable queue with backpressure protection."""
         async with self.lock:
             # Backpressure guard
@@ -166,10 +357,15 @@ class TokenRoundRobinScheduler:
                 await self._cleanup_session_resources(session)
                 return True
 
+        # Check if Continuous Batching is enabled and supported for this model
+        if self.enable_continuous_batching and hasattr(loaded_model, "batch_engine") and loaded_model.batch_engine is not None:
+            return await self._step_continuous_batch(loaded_model, session)
+
         # Phase 1: Initialize session on backend if in WAITING
         if session.phase == SessionPhase.WAITING:
             session.metrics.start_time = time.monotonic()
             session.phase = SessionPhase.PREFILLING
+            session.admitted = True
             loaded_model.active_sessions += 1
             loaded_model.last_active_time = time.monotonic()
 
