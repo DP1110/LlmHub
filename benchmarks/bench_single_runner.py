@@ -178,6 +178,89 @@ def benchmark_model_manager_admission(iterations: int = 2000) -> float:
     avg_us = (elapsed / iterations) * 1_000_000.0
     return avg_us
 
+def benchmark_scheduler_step_overhead(iterations: int = 500) -> float:
+    import asyncio
+    from llmhub.scheduler.scheduler import TokenRoundRobinScheduler
+    from llmhub.scheduler.session import SchedSession
+    from llmhub.server.model_manager import ModelManager
+    from tests.test_scheduler import MockSchedBackend, make_loaded_model
+
+    b = MockSchedBackend("bench-m")
+    lm = make_loaded_model("bench-m", b)
+    mgr = ModelManager()
+    mgr.loaded_models["bench-m"] = lm
+
+    sched = TokenRoundRobinScheduler(model_manager=mgr, default_quantum=4)
+
+    async def _run():
+        for i in range(iterations):
+            sess = SchedSession(f"s-{i}", "bench-m", "prompt", max_tokens=4, quantum_tokens=4)
+            await sched.submit_session(sess)
+            # WAITING -> PREFILLING
+            await sched.step()
+            # PREFILLING -> DECODING
+            await sched.step()
+            # DECODING -> COMPLETED
+            await sched.step()
+
+    start = time.perf_counter()
+    asyncio.run(_run())
+    elapsed = time.perf_counter() - start
+    avg_us = (elapsed / (iterations * 3)) * 1_000_000.0
+    return avg_us
+
+def benchmark_scheduler_modes_comparison() -> None:
+    from llmhub.scheduler.policy import ThreadingMode
+    from llmhub.scheduler.simulator import DeterministicSchedulerSimulator, SimSessionSpec
+
+    prof = HardwareDetector.get_profile()
+    cores = max(1, prof.cpu.physical_cores)
+
+    modes = [
+        ("(a) Time-Slice", ThreadingMode.TIME_SLICE),
+        ("(b) Partition", ThreadingMode.PARTITION),
+        ("(c) Hybrid", ThreadingMode.HYBRID),
+    ]
+    model_counts = [1, 2, 4]
+
+    print("\n" + "=" * 80)
+    print(" PHASE 5 SCHEDULER CPU THREADING MODES COMPARISON (1, 2, 4 CONCURRENT MODELS)")
+    print("=" * 80)
+    print(f"{'Mode':<18} | {'Models':<7} | {'Agg tok/s':<11} | {'Avg TTFT(ms)':<13} | {'Context Sw':<11} | {'Jain Index':<10}")
+    print("-" * 80)
+
+    for mode_name, mode_enum in modes:
+        for n_models in model_counts:
+            sim = DeterministicSchedulerSimulator(
+                threading_mode=mode_enum,
+                physical_cores=cores,
+                base_decode_ms_per_tok=20.0,
+                context_switch_penalty_ms=0.5,
+            )
+
+            # 2 sessions per model, 128 prompt tokens, 64 completion tokens
+            specs = []
+            for m_idx in range(n_models):
+                for s_idx in range(2):
+                    specs.append(SimSessionSpec(
+                        session_id=f"m{m_idx}_s{s_idx}",
+                        model_tag=f"model-{m_idx}",
+                        prompt_tokens=128,
+                        completion_tokens=64,
+                        weight=1.0,
+                        priority=5,
+                        quantum_tokens=4,
+                        chunk_size=256,
+                    ))
+
+            res = sim.run_simulation(specs)
+            agg_tok_s = res.total_tokens / (res.total_time_ms / 1000.0) if res.total_time_ms > 0 else 0.0
+            avg_ttft = sum(m["ttft_ms"] for m in res.sessions_metrics.values()) / max(1, len(res.sessions_metrics))
+
+            print(f"{mode_name:<18} | {n_models:<7} | {agg_tok_s:>9.2f}   | {avg_ttft:>11.2f}   | {res.total_context_switches:>10}  | {res.jains_fairness_index:>9.4f}")
+
+    print("=" * 80)
+
 def run_benchmarks() -> None:
     prof = HardwareDetector.get_profile()
     cpu = prof.cpu
@@ -227,9 +310,15 @@ def run_benchmarks() -> None:
     adm_us = benchmark_model_manager_admission(2000)
     print(f"  -> Average Admission Check Latency:  {adm_us:.3f} us / evaluation")
 
+    print("Running Token Round-Robin Scheduler step dispatch (1500 steps)...")
+    sched_step_us = benchmark_scheduler_step_overhead(500)
+    print(f"  -> Average Scheduler Step Overhead:  {sched_step_us:.3f} us / turn")
+
     print("=" * 70)
     print(" Micro-benchmark passed with zero bottlenecks in Python orchestration path.")
-    print("=" * 70)
+
+    # Phase 5 Threading Modes Comparison
+    benchmark_scheduler_modes_comparison()
 
 if __name__ == "__main__":
     run_benchmarks()

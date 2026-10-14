@@ -255,6 +255,84 @@
         "Endpoint /api/ps reports all resident models, pinned flags, active sessions, and RAM usage",
         "Properly increments and decrements active_sessions reference counts per model"
       ]
+    },
+    {
+      "id": "US-021",
+      "title": "Runnable Session Queue & Token-Level Round-Robin Dispatch",
+      "phase": 5,
+      "description": "Implement a runnable queue of sessions across all resident models with a token quantum Q (default 4 tokens) per decode turn.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Queue of active sessions spanning multiple models",
+        "Step sessions in configurable quantum Q tokens (default 4)",
+        "Preempt and yield at exact quantum boundaries without context corruption",
+        "Emit token deltas to session stream buffer per quantum"
+      ]
+    },
+    {
+      "id": "US-022",
+      "title": "Chunked Prefill Interleaving",
+      "phase": 5,
+      "description": "Interleave prompt evaluation in chunks of P tokens (default 256) with other sessions' decode turns to avoid decode starvation.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Prefill long prompts in slices of P tokens (default 256)",
+        "Yield to runnable queue between prefill chunks",
+        "Decode sessions continue receiving quantum turns during large prompt prefills",
+        "Accurate prefill tracking with zero prompt token loss"
+      ]
+    },
+    {
+      "id": "US-023",
+      "title": "Weighted Round-Robin & Priority Scheduling with Deficit Accounting",
+      "phase": 5,
+      "description": "Implement deficit round-robin supporting per-model and per-session weights and priorities ensuring starvation freedom.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Per-session and per-model weight weighting quantum allocation",
+        "Deficit round-robin credit accumulation preventing high-weight starvation",
+        "Priority tiers (1-10) with starvation-free fairness guarantees",
+        "Quantifiable credit tracking per scheduling round"
+      ]
+    },
+    {
+      "id": "US-024",
+      "title": "Switchable CPU Threading Modes: (a) Time-Slice, (b) Partition, (c) Hybrid",
+      "phase": 5,
+      "description": "Implement switchable CPU core allocation strategies: (a) all threads to one session; (b) split physical cores among models; (c) hybrid dynamic partitioning.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Mode (a) Time-Slice: allocate all physical cores to active model per quantum",
+        "Mode (b) Partition: statically split physical cores among resident models",
+        "Mode (c) Hybrid: dynamically allocate threads based on active model count and Big.LITTLE topology",
+        "Runtime switchable via config and API"
+      ]
+    },
+    {
+      "id": "US-025",
+      "title": "Preemption Points, Cancellation, Timeouts & Backpressure",
+      "phase": 5,
+      "description": "Enforce strict preemption boundaries at quantum limits, handle client cancellations, timeouts, max_tokens, and backpressure under load.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Preemption points only at quantum boundaries (never inside C++ decode)",
+        "Client cancellation gracefully closes backend session and frees resources",
+        "Per-session timeout enforcement with TIMED_OUT status",
+        "Backpressure rejection (HTTP 429) when queue depth exceeds capacity"
+      ]
+    },
+    {
+      "id": "US-026",
+      "title": "Deterministic Fairness Simulator & Jain's Fairness Index Benchmark",
+      "phase": 5,
+      "description": "Build deterministic simulator to calculate Jain's fairness index (J >= 0.95), context switch overhead, and benchmark modes (a)/(b)/(c) with 1, 2, 4 concurrent models.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Simulator proving mathematical fairness: Jain's Fairness Index >= 0.95",
+        "Track queue wait time, TTFT distribution, and tokens/sec per session",
+        "Measure context-switch overhead across session and model switches",
+        "Benchmark comparing modes (a)/(b)/(c) across 1, 2, and 4 concurrent models"
+      ]
     }
   ]
 }

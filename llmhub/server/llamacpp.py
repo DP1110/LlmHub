@@ -204,6 +204,17 @@ class LlamaCppBackend(Backend):
             total_tokens_generated=gen_count
         )
 
+    def set_n_threads(self, n_threads: int) -> None:
+        self.n_threads = max(1, n_threads)
+        if self.llm is not None:
+            if hasattr(self.llm, "set_n_threads"):
+                try:
+                    self.llm.set_n_threads(self.n_threads)
+                except Exception:
+                    pass
+            elif hasattr(self.llm, "n_threads"):
+                self.llm.n_threads = self.n_threads
+
     def close_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
         gen = self._generators.pop(session_id, None)

@@ -108,3 +108,8 @@ class Backend(ABC):
     def get_info(self) -> Dict[str, Any]:
         """Return operational metrics, memory allocation, and active sessions count."""
         pass
+
+    def set_n_threads(self, n_threads: int) -> None:
+        """Dynamically update CPU execution threads for active context."""
+        pass
+
