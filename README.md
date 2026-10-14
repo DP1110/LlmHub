@@ -364,16 +364,23 @@ Access the Web GUI at **`http://localhost:11434/`**!
 LLMHub includes native support for unprivileged Termux on Android ARM64 devices:
 
 ```bash
-# 1. Inside Termux on Android:
-pkg update && pkg install -y git python clang cmake ninja termux-api
+# 1. Inside Termux on Android (install build toolchain & pre-compiled psutil):
+pkg update -y && pkg install -y git python python-psutil clang cmake ninja termux-tools
 
 # 2. Clone and run the automated Termux setup script
 git clone https://github.com/DP1110/LlmHub.git
 cd LlmHub
 bash install-termux.sh
 
-# 3. Run LLMHub with mobile thermal throttling & low-memory mode enabled
+# 3. Pull a lightweight mobile model (only ~390 MB)
+llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m
+
+# 4. Chat 100% offline directly in terminal (airplane mode supported):
+llmhub run Qwen2.5-0.5B-Instruct-GGUF:q4_k_m
+
+# OR launch the mobile server daemon & use the Web GUI in your phone's browser:
 llmhub serve --low-mem
+# Then navigate to: http://localhost:11434
 ```
 
 ---
