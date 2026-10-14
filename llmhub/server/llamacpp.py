@@ -6,7 +6,13 @@ Provides token-level quantum decoding, chunked prefill, and multi-session isolat
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-import llama_cpp
+
+try:
+    import llama_cpp
+    HAS_LLAMA_CPP = True
+except ImportError:
+    llama_cpp = None
+    HAS_LLAMA_CPP = False
 
 from llmhub.core.gguf_parser import GGUFParser, GGUFMetadata
 from llmhub.hardware.tuner import AutoTuner
@@ -17,7 +23,7 @@ class LlamaCppBackend(Backend):
     """Local CPU execution engine powered by llama.cpp."""
 
     def __init__(self) -> None:
-        self.llm: Optional[llama_cpp.Llama] = None
+        self.llm: Optional[Any] = None
         self.model_path: Optional[Path] = None
         self.n_ctx: int = 2048
         self.n_threads: int = 4
@@ -45,6 +51,11 @@ class LlamaCppBackend(Backend):
         self.n_ctx = n_ctx
         self.n_threads = n_threads
         self.metadata = GGUFParser.parse_file(self.model_path)
+
+        if not HAS_LLAMA_CPP or llama_cpp is None:
+            raise RuntimeError(
+                "llama-cpp-python is not installed. To run models locally, install llama-cpp-python or use native llama.cpp."
+            )
 
         self.llm = llama_cpp.Llama(
             model_path=str(self.model_path),

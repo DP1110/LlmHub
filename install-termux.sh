@@ -60,6 +60,8 @@ if command -v pkg >/dev/null 2>&1; then
         echo -e "${RED}[ERROR] Failed to install essential packages via pkg.${NC}"
         exit 1
     }
+    # Attempt to install native llama-cpp package if available in Termux repositories
+    pkg install -y llama-cpp 2>/dev/null || true
 elif command -v apt-get >/dev/null 2>&1; then
     apt-get install -y \
         python3 \

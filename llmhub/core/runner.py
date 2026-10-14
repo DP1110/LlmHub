@@ -11,7 +11,13 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
-import llama_cpp
+
+try:
+    import llama_cpp
+    HAS_LLAMA_CPP = True
+except ImportError:
+    llama_cpp = None
+    HAS_LLAMA_CPP = False
 
 from llmhub.config import LLMHubConfig
 from llmhub.core.gguf_parser import GGUFParser, GGUFMetadata
@@ -43,6 +49,7 @@ class ModelRunner:
         self.use_mmap = use_mmap
         self.use_mlock = use_mlock
         self.verbose = verbose
+        self._cli_binary: Optional[str] = None
 
         # Parse GGUF metadata for chat template and layer info
         self.metadata: GGUFMetadata = GGUFParser.parse_file(self.model_path)
@@ -52,20 +59,33 @@ class ModelRunner:
         )
 
         # Initialize llama.cpp Llama instance
-        self.llm: Optional[llama_cpp.Llama] = None
+        self.llm: Optional[Any] = None
         self._load_model()
 
     def _load_model(self) -> None:
-        """Instantiate llama.cpp context with mmap and thread settings."""
-        self.llm = llama_cpp.Llama(
-            model_path=str(self.model_path),
-            n_ctx=self.n_ctx,
-            n_threads=self.n_threads,
-            n_batch=512,
-            use_mmap=self.use_mmap,
-            use_mlock=self.use_mlock,
-            verbose=self.verbose
-        )
+        """Instantiate llama.cpp context with mmap and thread settings, with llama-cli fallback."""
+        if HAS_LLAMA_CPP and llama_cpp is not None:
+            self.llm = llama_cpp.Llama(
+                model_path=str(self.model_path),
+                n_ctx=self.n_ctx,
+                n_threads=self.n_threads,
+                n_batch=512,
+                use_mmap=self.use_mmap,
+                use_mlock=self.use_mlock,
+                verbose=self.verbose
+            )
+        else:
+            import shutil
+            self._cli_binary = shutil.which("llama-cli") or shutil.which("llama") or shutil.which("main")
+            if not self._cli_binary:
+                raise RuntimeError(
+                    "Neither 'llama-cpp-python' nor native 'llama-cli' binary was found.\n"
+                    "To enable model inference in Termux, install native llama.cpp with:\n"
+                    "  pkg install llama-cpp\n"
+                    "Or compile it directly with:\n"
+                    "  pkg install git cmake clang make -y\n"
+                    "  git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp && cmake -B build && cmake --build build -j4"
+                )
 
     def close(self) -> None:
         """Explicitly free native model resources."""
@@ -114,8 +134,53 @@ class ModelRunner:
         stop: Optional[List[str]] = None
     ) -> Generator[Dict[str, Any], None, None]:
         """Stream generated tokens while recording TTFT and tok/s metrics."""
-        if not self.llm:
+        if not self.llm and not getattr(self, "_cli_binary", None):
             raise RuntimeError("Model is not loaded.")
+
+        if self.llm is None and getattr(self, "_cli_binary", None):
+            import subprocess
+            cmd = [
+                self._cli_binary,
+                "-m", str(self.model_path),
+                "-p", prompt,
+                "-n", str(max_tokens),
+                "--temp", str(temperature),
+                "--top-p", str(top_p),
+                "-t", str(self.n_threads),
+                "-c", str(self.n_ctx),
+                "--no-display-prompt"
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            start_time = time.perf_counter()
+            first_token_time = None
+            ttft_ms = 0.0
+            token_count = 0
+            for line in proc.stdout:
+                now = time.perf_counter()
+                if first_token_time is None:
+                    first_token_time = now
+                    ttft_ms = (first_token_time - start_time) * 1000.0
+                token_count += len(line.split())
+                decode_duration = (now - first_token_time) if first_token_time else 0.0
+                decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+                yield {
+                    "token": line,
+                    "token_count": token_count,
+                    "ttft_ms": ttft_ms,
+                    "decode_tok_s": decode_tok_s,
+                    "total_elapsed_s": now - start_time,
+                    "done": False
+                }
+            proc.wait()
+            yield {
+                "token": "",
+                "token_count": token_count,
+                "ttft_ms": ttft_ms,
+                "decode_tok_s": decode_tok_s,
+                "total_elapsed_s": time.perf_counter() - start_time,
+                "done": True
+            }
+            return
 
         if stop is None:
             stop = ["<|im_end|>", "<|eot_id|>", "</s>", "\nUser:", "<|end_of_text|>"]
