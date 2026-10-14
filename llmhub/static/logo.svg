@@ -1,95 +1,75 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
   <defs>
-    <!-- Background Gradient -->
-    <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
-      <stop offset="0%" stop-color="#1e1e38" stop-opacity="0.8"/>
-      <stop offset="100%" stop-color="#0a0a14" stop-opacity="1"/>
-    </radialGradient>
-
-    <!-- Vibrant Core Gradients -->
-    <linearGradient id="primaryGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#06b6d4"/>
-      <stop offset="50%" stop-color="#3b82f6"/>
-      <stop offset="100%" stop-color="#8b5cf6"/>
-    </linearGradient>
-
-    <linearGradient id="accentGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#10b981"/>
-      <stop offset="50%" stop-color="#06b6d4"/>
-      <stop offset="100%" stop-color="#60a5fa"/>
-    </linearGradient>
-
-    <linearGradient id="coreGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+    <!-- Monochrome Gradients & Filters -->
+    <linearGradient id="bwCore" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#ffffff"/>
-      <stop offset="100%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#a1a1aa"/>
     </linearGradient>
 
-    <!-- Drop Shadow / Glow Filters -->
-    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
-      <feGaussianBlur stdDeviation="12" result="blur"/>
-      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
-    </filter>
+    <linearGradient id="bwFaint" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#52525b" stop-opacity="0.3"/>
+    </linearGradient>
 
-    <filter id="hubShadow" x="-10%" y="-10%" width="120%" height="120%">
-      <feDropShadow dx="0" dy="8" stdDeviation="16" flood-color="#06b6d4" flood-opacity="0.35"/>
+    <filter id="bwGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
     </filter>
   </defs>
 
-  <!-- Dark Rounded App Icon Container -->
-  <rect width="512" height="512" rx="128" fill="url(#bgGlow)"/>
-  <rect width="510" height="510" x="1" y="1" rx="127" fill="none" stroke="rgba(255, 255, 255, 0.08)" stroke-width="2"/>
+  <!-- Pitch Black Icon Container -->
+  <rect width="512" height="512" rx="128" fill="#000000"/>
+  <rect width="510" height="510" x="1" y="1" rx="127" fill="none" stroke="#27272a" stroke-width="2"/>
 
   <!-- Outer Isometric Hexagonal Ring (Distributed Nodes) -->
-  <g transform="translate(256, 256)" filter="url(#hubShadow)">
-    <!-- Outer Hexagon Circuit Tracks -->
+  <g transform="translate(256, 256)">
+    <!-- Perimeter Track -->
     <polygon points="0,-180 156,-90 156,90 0,180 -156,90 -156,-90"
              fill="none"
-             stroke="url(#primaryGrad)"
-             stroke-width="5"
-             stroke-dasharray="8 6"
-             opacity="0.6"/>
+             stroke="#3f3f46"
+             stroke-width="3"
+             stroke-dasharray="6 6"/>
 
-    <!-- Orbital Corner Nodes (Edge Workers: PC, Mac, Linux, Phone, ARM64) -->
-    <circle cx="0" cy="-180" r="10" fill="#06b6d4" filter="url(#neonGlow)"/>
-    <circle cx="156" cy="-90" r="10" fill="#3b82f6" filter="url(#neonGlow)"/>
-    <circle cx="156" cy="90" r="10" fill="#8b5cf6" filter="url(#neonGlow)"/>
-    <circle cx="0" cy="180" r="10" fill="#a855f7" filter="url(#neonGlow)"/>
-    <circle cx="-156" cy="90" r="10" fill="#06b6d4" filter="url(#neonGlow)"/>
-    <circle cx="-156" cy="-90" r="10" fill="#10b981" filter="url(#neonGlow)"/>
+    <!-- Perimeter Worker Nodes -->
+    <circle cx="0" cy="-180" r="8" fill="#ffffff" filter="url(#bwGlow)"/>
+    <circle cx="156" cy="-90" r="8" fill="#e4e4e7"/>
+    <circle cx="156" cy="90" r="8" fill="#a1a1aa"/>
+    <circle cx="0" cy="180" r="8" fill="#71717a"/>
+    <circle cx="-156" cy="90" r="8" fill="#a1a1aa"/>
+    <circle cx="-156" cy="-90" r="8" fill="#e4e4e7"/>
 
-    <!-- Geometric Hub Facets (Isometric Neural Processor) -->
+    <!-- Minimalist Isometric Facets -->
     <!-- Top Face -->
     <polygon points="0,-110 95,-55 0,0 -95,-55"
-             fill="url(#primaryGrad)"
-             opacity="0.9"/>
+             fill="#ffffff"
+             opacity="0.95"/>
     
     <!-- Right Face -->
     <polygon points="0,0 95,-55 95,55 0,110"
-             fill="url(#primaryGrad)"
-             opacity="0.65"/>
+             fill="#a1a1aa"
+             opacity="0.7"/>
 
     <!-- Left Face -->
     <polygon points="0,0 0,110 -95,55 -95,-55"
-             fill="url(#primaryGrad)"
-             opacity="0.45"/>
+             fill="#3f3f46"
+             opacity="0.8"/>
 
-    <!-- Inner Core Nexus (Offline Engine Chip) -->
-    <rect x="-38" y="-38" width="76" height="76" rx="18"
+    <!-- Central Micro-Nexus Chip -->
+    <rect x="-34" y="-34" width="68" height="68" rx="14"
           transform="rotate(45)"
-          fill="#0f172a"
-          stroke="url(#coreGlow)"
-          stroke-width="4"
-          filter="url(#neonGlow)"/>
+          fill="#09090b"
+          stroke="#ffffff"
+          stroke-width="3"/>
 
-    <!-- Central Neural Spark (GGUF Token Stream) -->
-    <circle cx="0" cy="0" r="12" fill="url(#coreGlow)"/>
+    <!-- Core Dot -->
+    <circle cx="0" cy="0" r="9" fill="#ffffff"/>
 
-    <!-- Dynamic Bus Lines Connecting Core to Outer Nodes -->
-    <line x1="0" y1="-54" x2="0" y2="-180" stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
-    <line x1="47" y1="-27" x2="156" y2="-90" stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
-    <line x1="47" y1="27" x2="156" y2="90" stroke="url(#primaryGrad)" stroke-width="3" stroke-linecap="round"/>
-    <line x1="0" y1="54" x2="0" y2="180" stroke="url(#primaryGrad)" stroke-width="3" stroke-linecap="round"/>
-    <line x1="-47" y1="27" x2="-156" y2="90" stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
-    <line x1="-47" y1="-27" x2="-156" y2="-90" stroke="url(#accentGrad)" stroke-width="3" stroke-linecap="round"/>
+    <!-- Fine Circuit Rays -->
+    <line x1="0" y1="-50" x2="0" y2="-180" stroke="#71717a" stroke-width="2" stroke-linecap="round"/>
+    <line x1="47" y1="-27" x2="156" y2="-90" stroke="#71717a" stroke-width="2" stroke-linecap="round"/>
+    <line x1="47" y1="27" x2="156" y2="90" stroke="#52525b" stroke-width="2" stroke-linecap="round"/>
+    <line x1="0" y1="50" x2="0" y2="180" stroke="#3f3f46" stroke-width="2" stroke-linecap="round"/>
+    <line x1="-47" y1="27" x2="-156" y2="90" stroke="#52525b" stroke-width="2" stroke-linecap="round"/>
+    <line x1="-47" y1="-27" x2="-156" y2="-90" stroke="#71717a" stroke-width="2" stroke-linecap="round"/>
   </g>
 </svg>

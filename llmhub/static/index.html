@@ -7,21 +7,21 @@
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <style>
     :root {
-      --bg: #090d16;
-      --card-bg: #111827;
-      --card-hover: #172033;
-      --border: #1f293d;
-      --border-focus: #38bdf8;
-      --text: #f1f5f9;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --primary: #06b6d4;
-      --primary-hover: #0891b2;
-      --accent: #8b5cf6;
-      --success: #10b981;
-      --warning: #f59e0b;
-      --danger: #ef4444;
-      --code-bg: #0b0f19;
+      --bg: #000000;
+      --card-bg: #09090b;
+      --card-hover: #121214;
+      --border: #222225;
+      --border-focus: #ffffff;
+      --text: #ffffff;
+      --text-muted: #a1a1aa;
+      --text-dim: #71717a;
+      --primary: #ffffff;
+      --primary-hover: #e4e4e7;
+      --accent: #ffffff;
+      --success: #ffffff;
+      --warning: #d4d4d8;
+      --danger: #ffffff;
+      --code-bg: #000000;
       --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
       --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
     }
@@ -40,8 +40,8 @@
 
     /* Header */
     header {
-      background: rgba(17, 24, 39, 0.85);
-      backdrop-filter: blur(12px);
+      background: rgba(0, 0, 0, 0.95);
+      backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border);
       padding: 0.75rem 1.5rem;
       display: flex;
@@ -57,43 +57,44 @@
       color: var(--text);
     }
     .brand img, .brand svg {
-      width: 34px;
-      height: 34px;
-      border-radius: 8px;
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
     }
     .brand h1 {
-      font-size: 1.25rem;
+      font-size: 1.15rem;
       font-weight: 700;
-      letter-spacing: -0.02em;
-      background: linear-gradient(135deg, #38bdf8, #818cf8);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
+      letter-spacing: -0.03em;
+      color: #ffffff;
+      background: none;
+      -webkit-text-fill-color: initial;
     }
     .badge-version {
-      font-size: 0.7rem;
-      background: rgba(56, 189, 248, 0.15);
-      color: #38bdf8;
-      border: 1px solid rgba(56, 189, 248, 0.3);
+      font-size: 0.65rem;
+      background: #18181b;
+      color: #ffffff;
+      border: 1px solid var(--border);
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
       font-family: var(--font-mono);
       margin-left: 0.25rem;
+      letter-spacing: 0.05em;
     }
 
     nav {
       display: flex;
-      gap: 0.5rem;
-      background: rgba(15, 23, 42, 0.6);
+      gap: 0.35rem;
+      background: #09090b;
       padding: 0.25rem;
       border-radius: 8px;
       border: 1px solid var(--border);
     }
     .tab-btn {
       background: transparent;
-      border: none;
+      border: 1px solid transparent;
       color: var(--text-muted);
-      padding: 0.4rem 0.9rem;
-      font-size: 0.875rem;
+      padding: 0.4rem 0.85rem;
+      font-size: 0.825rem;
       font-weight: 500;
       border-radius: 6px;
       cursor: pointer;
@@ -102,11 +103,12 @@
       gap: 0.4rem;
       transition: all 0.15s ease;
     }
-    .tab-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+    .tab-btn:hover { color: #ffffff; background: #141417; }
     .tab-btn.active {
-      color: #fff;
-      background: linear-gradient(135deg, rgba(6, 182, 212, 0.25), rgba(139, 92, 246, 0.25));
-      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #000000;
+      background: #ffffff;
+      font-weight: 600;
+      border-color: #ffffff;
     }
 
     .header-status {
@@ -119,19 +121,20 @@
       display: flex;
       align-items: center;
       gap: 0.4rem;
-      background: rgba(16, 185, 129, 0.1);
-      color: var(--success);
-      border: 1px solid rgba(16, 185, 129, 0.25);
-      padding: 0.25rem 0.6rem;
+      background: #09090b;
+      color: #ffffff;
+      border: 1px solid var(--border);
+      padding: 0.25rem 0.65rem;
       border-radius: 9999px;
       font-family: var(--font-mono);
+      font-size: 0.75rem;
     }
     .status-dot {
-      width: 7px;
-      height: 7px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: var(--success);
-      box-shadow: 0 0 8px var(--success);
+      background: #ffffff;
+      box-shadow: 0 0 6px rgba(255, 255, 255, 0.8);
     }
 
     /* Main Container */
@@ -194,7 +197,7 @@
     }
     input[type="range"] {
       width: 100%;
-      accent-color: var(--primary);
+      accent-color: #ffffff;
     }
 
     .chat-main {
@@ -225,21 +228,22 @@
     .message-avatar {
       width: 32px;
       height: 32px;
-      border-radius: 8px;
+      border-radius: 6px;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 0.85rem;
+      font-size: 0.8rem;
       font-weight: 700;
       flex-shrink: 0;
     }
     .message-user .message-avatar {
-      background: linear-gradient(135deg, #0284c7, #2563eb);
-      color: #fff;
+      background: #18181b;
+      color: #ffffff;
+      border: 1px solid #27272a;
     }
     .message-assistant .message-avatar {
-      background: linear-gradient(135deg, #06b6d4, #8b5cf6);
-      color: #fff;
+      background: #ffffff;
+      color: #000000;
     }
     .message-body {
       flex: 1;
@@ -265,8 +269,8 @@
       word-break: break-word;
     }
     .message-user .message-content {
-      background: #1e293b;
-      border-color: #334155;
+      background: #121214;
+      border-color: #27272a;
     }
     .message-stats {
       font-size: 0.7rem;
@@ -296,10 +300,10 @@
       font-size: 0.95rem;
     }
     .btn {
-      background: var(--primary);
-      color: #0b0f19;
+      background: #ffffff;
+      color: #000000;
       font-weight: 600;
-      border: none;
+      border: 1px solid #ffffff;
       border-radius: 6px;
       padding: 0.75rem 1.25rem;
       cursor: pointer;
@@ -309,16 +313,20 @@
       gap: 0.4rem;
       transition: background 0.15s, opacity 0.15s;
     }
-    .btn:hover { background: #38bdf8; }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn:hover { background: #e4e4e7; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
     .btn-secondary {
-      background: var(--code-bg);
-      color: var(--text);
+      background: #09090b;
+      color: #ffffff;
       border: 1px solid var(--border);
     }
-    .btn-secondary:hover { background: var(--card-hover); border-color: var(--text-dim); }
-    .btn-danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.4); }
-    .btn-danger:hover { background: var(--danger); color: #fff; }
+    .btn-secondary:hover { background: #18181b; border-color: #ffffff; }
+    .btn-danger {
+      background: #09090b;
+      color: #ffffff;
+      border: 1px solid #52525b;
+    }
+    .btn-danger:hover { background: #ffffff; color: #000000; }
 
     /* ====================================================================== */
     /* 2. MODELS VIEW                                                         */
@@ -337,13 +345,13 @@
       align-items: center;
       justify-content: space-between;
     }
-    .panel-title { font-size: 1.4rem; font-weight: 700; }
+    .panel-title { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.02em; }
     .panel-subtitle { font-size: 0.85rem; color: var(--text-muted); }
 
     .card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 1.5rem;
     }
     .table-responsive { width: 100%; overflow-x: auto; }
@@ -354,31 +362,34 @@
       font-weight: 600;
       color: var(--text-dim);
       text-transform: uppercase;
-      font-size: 0.75rem;
+      font-size: 0.725rem;
       letter-spacing: 0.05em;
     }
     td {
       padding: 0.85rem 1rem;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      border-bottom: 1px solid #141417;
       vertical-align: middle;
     }
-    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    tr:hover td { background: #121215; }
     .tag-badge {
       font-family: var(--font-mono);
       font-weight: 600;
-      color: #38bdf8;
+      color: #ffffff;
     }
     .badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
       border-radius: 4px;
-      font-size: 0.75rem;
+      font-size: 0.725rem;
       font-family: var(--font-mono);
       font-weight: 600;
+      background: #18181b;
+      color: #ffffff;
+      border: 1px solid var(--border);
     }
-    .badge-green { background: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
-    .badge-blue { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
-    .badge-purple { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
+    .badge-green { background: #ffffff; color: #000000; border-color: #ffffff; }
+    .badge-blue { background: #121214; color: #d4d4d8; border-color: #27272a; }
+    .badge-purple { background: #27272a; color: #ffffff; border-color: #3f3f46; }
 
     /* Grid for Cluster & Hardware */
     .grid-2 {
@@ -397,7 +408,7 @@
       font-family: var(--font-mono);
       color: #fff;
     }
-    .stat-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-label { font-size: 0.725rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
 
     /* Node Card */
     .node-card {
@@ -414,7 +425,7 @@
       justify-content: space-between;
       align-items: center;
     }
-    .node-name { font-weight: 600; font-size: 1rem; color: #fff; }
+    .node-name { font-weight: 600; font-size: 0.95rem; color: #fff; }
     .node-info-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -449,8 +460,8 @@
       right: -14px;
       top: 50%;
       transform: translateY(-50%);
-      color: var(--primary);
-      font-size: 1.1rem;
+      color: #ffffff;
+      font-size: 1rem;
     }
     .stage-card:last-child::after { content: ""; }
   </style>
@@ -566,7 +577,7 @@
 
         <!-- Resident Models (In Memory) -->
         <div class="card">
-          <h3 style="margin-bottom:1rem; font-size:1.1rem; color:#38bdf8;">Resident In Memory (Active Execution)</h3>
+          <h3 style="margin-bottom:1rem; font-size:1.1rem; color:#ffffff;">Resident In Memory (Active Execution)</h3>
           <div class="table-responsive">
             <table>
               <thead>
@@ -640,7 +651,7 @@
           </div>
           <div class="card stat-box">
             <span class="stat-label">Discovery Beacon</span>
-            <span class="stat-value" style="font-size:1.2rem; color:var(--success);">UDP :11435 ACTIVE</span>
+            <span class="stat-value" style="font-size:1.2rem; color:#ffffff;">UDP :11435 ACTIVE</span>
           </div>
         </div>
 
@@ -654,7 +665,7 @@
 
         <!-- Pipeline Sharding Planner Simulator -->
         <div class="card">
-          <h3 style="margin-bottom:0.5rem; font-size:1.1rem; color:#818cf8;">Pipeline Parallel Layer Sharding Simulator</h3>
+          <h3 style="margin-bottom:0.5rem; font-size:1.1rem; color:#ffffff;">Pipeline Parallel Layer Sharding Simulator</h3>
           <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">Evaluate how a large model's transformer layers split across your heterogeneous cluster nodes (e.g. PC + Phone):</p>
           <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; margin-bottom:1.5rem;">
             <div>
@@ -1114,7 +1125,7 @@
           <div class="stage-card">
             <span style="font-size:0.75rem; color:var(--text-dim);">STAGE ${s.stage_id}</span>
             <b style="color:#fff;">${s.node_name}</b>
-            <div style="font-size:0.8rem; color:var(--text-muted);">Layers: <b style="color:#38bdf8;">${s.layer_start} - ${s.layer_end}</b> (${s.layer_count} layers)</div>
+            <div style="font-size:0.8rem; color:var(--text-muted);">Layers: <b style="color:#ffffff;">${s.layer_start} - ${s.layer_end}</b> (${s.layer_count} layers)</div>
             <div style="font-size:0.8rem; color:var(--text-muted);">RAM: <b>${s.estimated_memory_mb.toFixed(0)} MB</b></div>
             <div style="margin-top:0.25rem;">
               ${s.has_embeddings ? '<span class="badge badge-purple" style="font-size:0.65rem;">EMBEDDINGS</span>' : ''}
