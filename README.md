@@ -9,12 +9,13 @@
     <img src="https://img.shields.io/badge/Architecture-x86__64%20%7C%20ARM64-000000.svg?style=for-the-badge" alt="Arch" />
     <img src="https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20Termux-000000.svg?style=for-the-badge" alt="Platforms" />
     <img src="https://img.shields.io/badge/Tests-163%2F163%20Passing%20(100%25)-000000.svg?style=for-the-badge" alt="Tests" />
-    <img src="https://img.shields.io/badge/Cloud%20Dependencies-0%20(Offline%20First)-000000.svg?style=for-the-badge" alt="Zero Cloud" />
+    <a href="https://dp1110.github.io/LlmHub/"><img src="https://img.shields.io/badge/Live%20Showcase-GitHub%20Pages-000000.svg?style=for-the-badge&logo=githubpages&logoColor=white" alt="Live Showcase" /></a>
   </div>
 
   <br />
 
   <p>
+    <a href="https://dp1110.github.io/LlmHub/"><b>🌐 Live Web GUI Demo</b></a> •
     <a href="#1-abstract--system-motivation">Abstract</a> •
     <a href="#2-system-architecture">Architecture</a> •
     <a href="#3-mathematical-foundations--physical-models">Physical Formulations</a> •
@@ -168,7 +169,8 @@ LLMHub includes both a **Minimalist Black & White Web GUI Dashboard** and a **Hi
 
 ### 4.1 Minimalist Monochrome Web GUI
 
-The Web GUI is served directly by the FastAPI daemon at **`http://localhost:11434/`** with zero external dependencies (no remote CDNs, no telemetry scripts, fully functional offline):
+- **Live Online Showcase**: [**https://dp1110.github.io/LlmHub/**](https://dp1110.github.io/LlmHub/) (Hosted via GitHub Pages with integrated interactive simulator & local daemon bridge).
+- **Local Daemon Interface**: Served directly at **`http://localhost:11434/`** with zero external dependencies (no remote CDNs, no telemetry scripts, fully offline).
 
 ```
 +----------------------------------------------------------------------------------------------------+
