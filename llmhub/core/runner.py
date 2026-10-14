@@ -150,34 +150,89 @@ class ModelRunner:
                 "-c", str(self.n_ctx),
                 "--no-display-prompt"
             ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1
+            )
             start_time = time.perf_counter()
             first_token_time = None
             ttft_ms = 0.0
             token_count = 0
-            for line in proc.stdout:
-                now = time.perf_counter()
-                if first_token_time is None:
-                    first_token_time = now
-                    ttft_ms = (first_token_time - start_time) * 1000.0
-                token_count += len(line.split())
-                decode_duration = (now - first_token_time) if first_token_time else 0.0
-                decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
-                yield {
-                    "token": line,
-                    "token_count": token_count,
-                    "ttft_ms": ttft_ms,
-                    "decode_tok_s": decode_tok_s,
-                    "total_elapsed_s": now - start_time,
-                    "done": False
-                }
-            proc.wait()
+            try:
+                # Fluid token/character-based chunk streaming
+                buffer = ""
+                while True:
+                    char = proc.stdout.read(1)
+                    if not char:
+                        break
+                    buffer += char
+                    if char in (" ", "\n", "\t") or len(buffer) >= 8:
+                        token_count += 1
+                        now = time.perf_counter()
+                        if first_token_time is None:
+                            first_token_time = now
+                            ttft_ms = (first_token_time - start_time) * 1000.0
+                        decode_duration = (now - first_token_time) if first_token_time else 0.0
+                        decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+                        yield {
+                            "token": buffer,
+                            "token_count": token_count,
+                            "ttft_ms": ttft_ms,
+                            "decode_tok_s": decode_tok_s,
+                            "total_elapsed_s": now - start_time,
+                            "done": False
+                        }
+                        buffer = ""
+                # Yield remaining buffer if any
+                if buffer:
+                    token_count += 1
+                    now = time.perf_counter()
+                    if first_token_time is None:
+                        first_token_time = now
+                        ttft_ms = (first_token_time - start_time) * 1000.0
+                    decode_duration = (now - first_token_time) if first_token_time else 0.0
+                    decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+                    yield {
+                        "token": buffer,
+                        "token_count": token_count,
+                        "ttft_ms": ttft_ms,
+                        "decode_tok_s": decode_tok_s,
+                        "total_elapsed_s": now - start_time,
+                        "done": False
+                    }
+            finally:
+                if proc.stdout:
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2.0)
+                    except (subprocess.TimeoutExpired, Exception):
+                        proc.kill()
+                        proc.wait()
+                else:
+                    try:
+                        proc.wait(timeout=1.0)
+                    except (subprocess.TimeoutExpired, Exception):
+                        pass
+
+            total_elapsed = time.perf_counter() - start_time
+            decode_duration = (total_elapsed - (ttft_ms / 1000.0)) if first_token_time else total_elapsed
+            final_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+
             yield {
                 "token": "",
                 "token_count": token_count,
                 "ttft_ms": ttft_ms,
-                "decode_tok_s": decode_tok_s,
-                "total_elapsed_s": time.perf_counter() - start_time,
+                "decode_tok_s": final_tok_s,
+                "total_elapsed_s": total_elapsed,
                 "done": True
             }
             return

@@ -20,7 +20,6 @@ from llmhub.config import LLMHubConfig
 from llmhub.core.downloader import HFDownloader
 from llmhub.core.gguf_parser import GGUFParser
 from llmhub.core.registry import ModelRegistry
-from llmhub.core.runner import ModelRunner
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
 from llmhub.utils.platform import get_hardware_profile
 from llmhub.hardware.detector import HardwareDetector
@@ -231,6 +230,7 @@ def _run_standalone(config: LLMHubConfig, args: argparse.Namespace) -> None:
     ctx_size = args.ctx_size or config.settings["runtime"]["default_context_size"]
     threads = args.threads or config.settings["runtime"]["default_threads"]
 
+    from llmhub.core.runner import ModelRunner
     runner = ModelRunner(
         model_path=model_path,
         n_ctx=ctx_size,

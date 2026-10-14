@@ -1,4 +1,4 @@
-#!/data/data/com.termux/files/usr/bin/bash
+#!/usr/bin/env bash
 # ==============================================================================
 # LLMHub: Automated Installer for Android Termux (ARM64 Non-Root)
 # ==============================================================================
@@ -110,16 +110,62 @@ python -m pip install --no-build-isolation \
     echo -e "       (Core offline terminal runner 'llmhub run' and 'llmhub pull' are 100% ready!)${NC}"
 }
 
+mkdir -p "$HOME/.llmhub/logs"
+mkdir -p "$HOME/.llmhub/models"
+mkdir -p "$HOME/.llmhub/run"
+
 # Install llama-cpp-python with OpenBLAS / ARM NEON support
 echo -e "Checking llama-cpp-python..."
-python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir 2>/dev/null || {
-    echo -e "${YELLOW}[NOTE] llama-cpp-python build skipped or already installed.${NC}"
+python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir > "$HOME/.llmhub/logs/build-llama.log" 2>&1 || {
+    echo -e "${YELLOW}[NOTE] llama-cpp-python build skipped or already installed (logs in ~/.llmhub/logs/build-llama.log).${NC}"
 }
 
-# Install LLMHub package in current directory without triggering dependency re-resolution
+# Install LLMHub CLI launcher directly into PATH (bypasses setuptools/pip build isolation on Python 3.14)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo -e "Installing LLMHub CLI from ${SCRIPT_DIR}..."
-python -m pip install --no-build-isolation --no-deps -e "${SCRIPT_DIR}"
+
+# 1. Attempt standard pip install as non-editable fallback
+python -m pip install --no-build-isolation --no-deps "${SCRIPT_DIR}" > "$HOME/.llmhub/logs/pip-install.log" 2>&1 || true
+
+# 2. Deploy direct executable launcher script into bin directory
+if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+    TERMUX_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin"
+else
+    TERMUX_BIN="${PREFIX:-$HOME/.local}/bin"
+fi
+mkdir -p "$TERMUX_BIN"
+
+cat << EOF > "$TERMUX_BIN/llmhub"
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+# Resolve repo root dynamically with baked SCRIPT_DIR preference
+candidate_dirs = [
+    Path("${SCRIPT_DIR}").resolve(),
+    Path(os.environ.get("HOME", "")) / "llmhub",
+    Path(os.environ.get("HOME", "")) / "LlmHub",
+    Path("/data/data/com.termux/files/home/LlmHub"),
+    Path.cwd()
+]
+
+found_root = None
+for candidate in candidate_dirs:
+    if (candidate / "llmhub").is_dir():
+        found_root = candidate
+        break
+
+if found_root and str(found_root) not in sys.path:
+    sys.path.insert(0, str(found_root))
+
+from llmhub.cli import main
+if __name__ == "__main__":
+    main()
+EOF
+
+chmod +x "$TERMUX_BIN/llmhub"
+echo -e "${GREEN}[+] Successfully deployed LLMHub launcher to ${TERMUX_BIN}/llmhub${NC}"
 
 # 5. Initialize Directory Layout & Wake-Lock Test
 echo -e "\n${BOLD}[5/5] Initializing ~/.llmhub storage layout and wake-lock...${NC}"

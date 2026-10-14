@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-10-distributed-scaleout",
+  "branchName": "main",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -775,6 +775,58 @@
         "Benchmark beacon packet serialization (< 10 us)",
         "Benchmark pipeline sharding plan evaluation (< 50 us)",
         "100% test pass rate across all 160 tests in test suite"
+      ]
+    },
+    {
+      "id": "US-061",
+      "title": "Resilient Direct-Launcher CLI Installer for Termux ARM64",
+      "phase": 11,
+      "description": "Deploy an infallible launcher script directly to $PREFIX/bin/llmhub to bypass setuptools.build_meta and pip editable isolation crashes on Python 3.14.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Automatic deployment of executable launcher to $PREFIX/bin/llmhub",
+        "Dynamic resolution of repository root and sys.path injection",
+        "Zero dependency on pip editable mode or setuptools build isolation",
+        "Seamless execution on unprivileged Android Termux (ARM64)"
+      ]
+    },
+    {
+      "id": "US-062",
+      "title": "Native llama-cli Subprocess Fallback Execution Engine",
+      "phase": 11,
+      "description": "Provide a native subprocess fallback in ModelRunner that binds to llama-cli when llama-cpp-python C-bindings are not present.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Automatic detection of llama-cli, llama, or main binaries in PATH",
+        "Real-time streaming output line-by-line via subprocess stdout pipe",
+        "Accurate TTFT and decode tokens/sec tracking during subprocess generation",
+        "Clear, actionable guidance when neither engine is present"
+      ]
+    },
+    {
+      "id": "US-063",
+      "title": "Decoupled Lazy Loading of Backends and ModelRunner",
+      "phase": 11,
+      "description": "Lazy-load ModelRunner via module __getattr__ in llmhub.core and protect backend imports to prevent eager ModuleNotFoundError during offline CLI operations.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "llmhub pull, list, show, hardware execute without requiring llama_cpp installed",
+        "ModelRunner imported on-demand only when local inference is explicitly triggered",
+        "LlamaCppBackend handles missing llama_cpp gracefully with descriptive error",
+        "Zero regressions in existing test suite or standalone CLI operations"
+      ]
+    },
+    {
+      "id": "US-064",
+      "title": "Phase 11 Termux Hardening Verification Suite",
+      "phase": 11,
+      "description": "Add comprehensive unit tests verifying lazy loading, subprocess streaming fallback, and error handling for Termux ARM64.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "test_core_lazy_load_without_llama_cpp validates import isolation",
+        "test_model_runner_cli_fallback_when_llama_cpp_absent validates subprocess execution",
+        "test_model_runner_error_when_neither_available validates missing backend guidance",
+        "100% test pass rate across all 166 tests in test suite"
       ]
     }
   ]

@@ -397,3 +397,126 @@ def test_api_termux_endpoints() -> None:
     res_lm = client.post("/api/system/low-memory?enabled=true")
     assert res_lm.status_code == 200
     assert res_lm.json()["low_memory_mode"] is True
+
+
+def test_core_lazy_load_without_llama_cpp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure llmhub.core imports without requiring llama_cpp."""
+    import sys
+    monkeypatch.setitem(sys.modules, "llama_cpp", None)
+    import llmhub.core as core
+    # HFDownloader and others should be accessible
+    assert hasattr(core, "HFDownloader")
+    assert hasattr(core, "GGUFParser")
+    # ModelRunner should be lazy-loaded on access
+    runner_cls = core.ModelRunner
+    assert runner_cls is not None
+
+
+def test_model_runner_error_when_neither_available(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ModelRunner should raise clear error when neither llama_cpp nor llama-cli exists."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+
+    dummy_gguf = tmp_path / "test.gguf"
+    # Write a minimal dummy file
+    dummy_gguf.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda cmd: None)
+
+    # Patch parser so it doesn't fail on dummy bytes
+    with patch("llmhub.core.runner.GGUFParser.parse_file") as mock_parse:
+        mock_meta = MagicMock()
+        mock_meta.chat_template = ""
+        mock_meta.architecture = "llama"
+        mock_parse.return_value = mock_meta
+
+        with pytest.raises(RuntimeError, match="Neither 'llama-cpp-python' nor native 'llama-cli'"):
+            ModelRunner(model_path=dummy_gguf)
+
+
+def test_model_runner_cli_fallback_when_llama_cpp_absent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ModelRunner should successfully bind to llama-cli when llama_cpp is absent."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+
+    dummy_gguf = tmp_path / "test.gguf"
+    dummy_gguf.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli" if cmd == "llama-cli" else None)
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file") as mock_parse:
+        mock_meta = MagicMock()
+        mock_meta.chat_template = ""
+        mock_meta.architecture = "llama"
+        mock_meta.block_count = 12
+        mock_meta.head_count_kv = 4
+        mock_meta.head_dim = 64
+        mock_parse.return_value = mock_meta
+
+        runner = ModelRunner(model_path=dummy_gguf)
+        assert runner.llm is None
+        assert runner._cli_binary == "/usr/bin/llama-cli"
+
+        # Test stream_completion with mocked subprocess
+        import io
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Hello world!\n")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt="Hello"))
+            assert len(chunks) >= 2
+            # Verify stream tokens reconstructed full text
+            full_text = "".join(c["token"] for c in chunks)
+            assert full_text == "Hello world!\n"
+            assert chunks[-1]["done"] is True
+
+
+def test_core_lazy_load_dir_introspection() -> None:
+    """Ensure dir(llmhub.core) and inspect include ModelRunner per PEP 562."""
+    import llmhub.core as core
+    dir_entries = dir(core)
+    assert "ModelRunner" in dir_entries
+    assert "ModelRunner" in core.__all__
+
+
+def test_model_runner_cli_generator_early_close(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure subprocess is terminated and handles cleaned up when generator is closed early."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Long generation text that will be interrupted...")
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+
+            gen = runner.stream_completion(prompt="Hello")
+            first_chunk = next(gen)
+            assert len(first_chunk["token"]) > 0
+
+            # Simulate early client disconnect / generator close
+            gen.close()
+
+            # Verify subprocess cleanup was invoked
+            assert mock_proc.terminate.called or mock_proc.kill.called
+
