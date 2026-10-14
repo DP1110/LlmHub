@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-2-registry-hardware",
+  "branchName": "phase-3-backend-server",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -146,6 +146,54 @@
       "acceptanceCriteria": [
         "llmhub hardware outputs detailed CPU topology, RAM, SIMD, and Termux constraints",
         "llmhub plan <model> computes recommended threads, context window, and memory margins for a specific model"
+      ]
+    },
+    {
+      "id": "US-012",
+      "title": "Backend ABC Interface & LlamaCppBackend",
+      "phase": 3,
+      "description": "Design clean C-friendly Backend abstract base class with load, unload, new_session, prefill_chunk, decode_step, and implement LlamaCppBackend.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Backend ABC specifying load, unload, new_session, prefill_chunk, decode_step, get_info",
+        "LlamaCppBackend implementing token quantum decoding and chunked prompt evaluation",
+        "Session state tracking with isolated KV cache offsets, TTFT, and generation speed"
+      ]
+    },
+    {
+      "id": "US-013",
+      "title": "RemoteBackend Implementation",
+      "phase": 3,
+      "description": "Implement RemoteBackend connecting to another LLMHub node or remote OpenAI-compatible worker over HTTP/SSE.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "RemoteBackend implementing Backend ABC via HTTP calls and SSE streaming",
+        "Handles remote session initialization, token chunks, error propagation, and network timeouts"
+      ]
+    },
+    {
+      "id": "US-014",
+      "title": "OpenAI-Compatible HTTP Server with SSE Streaming",
+      "phase": 3,
+      "description": "Build high-performance async HTTP server exposing OpenAI-compatible /v1/chat/completions (SSE streaming and JSON), /v1/models, /api/ps, and /healthz.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Endpoint /v1/chat/completions supports streaming SSE ('data: {...}') and non-streaming responses",
+        "Endpoint /v1/models returns registered model list in OpenAI format",
+        "Endpoint /api/ps returns active resident models, active sessions, memory allocation, and tok/s throughput",
+        "Endpoint /healthz reports uptime and server status"
+      ]
+    },
+    {
+      "id": "US-015",
+      "title": "HTTP-Driven CLI Client Architecture",
+      "phase": 3,
+      "description": "Refactor CLI commands (run, list, ps, rm) to always interact with the local server over HTTP, and add 'llmhub serve' command with auto-start daemon capability.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "llmhub serve runs the FastAPI / uvicorn server on configured host and port",
+        "llmhub run, list, ps interact via HTTP client to http://127.0.0.1:11434",
+        "Clear diagnostic warning and guidance if server is not running"
       ]
     }
   ]

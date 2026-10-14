@@ -29,6 +29,18 @@ def test_cli_parser_defaults():
     assert args.subcommand == "rm"
     assert args.model == "qwen"
 
+    args = parser.parse_args(["serve", "--host", "0.0.0.0", "--port", "8000"])
+    assert args.subcommand == "serve"
+    assert args.host == "0.0.0.0"
+    assert args.port == 8000
+
+    args = parser.parse_args(["ps"])
+    assert args.subcommand == "ps"
+
+    args = parser.parse_args(["run", "qwen", "--local", "-p", "hi"])
+    assert args.subcommand == "run"
+    assert args.local is True
+
 def test_cli_list_empty(capsys):
     parser = build_parser()
     args = parser.parse_args(["list"])

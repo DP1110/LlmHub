@@ -24,6 +24,8 @@ from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_thr
 from llmhub.utils.platform import get_hardware_profile
 from llmhub.hardware.detector import HardwareDetector
 from llmhub.hardware.tuner import AutoTuner
+from llmhub.server.client import LLMHubClient, ServerUnavailableError
+from llmhub.server.server import run_server
 
 def cmd_pull(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -36,20 +38,39 @@ def cmd_pull(args: argparse.Namespace) -> None:
 
 def cmd_list(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
-    registry = ModelRegistry(config.db_path)
-    records = registry.list_models()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
 
-    if not records:
-        print("No models found in local storage.")
-        print("Pull a model with: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m")
-        return
+    if client.is_server_running():
+        models = client.list_models()
+        if not models:
+            print("No models found in local storage.")
+            print("Pull a model with: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m")
+            return
 
-    print(f"\n{'TAG':<45} {'ARCH':<10} {'QUANT':<10} {'SIZE':<10} {'MAX CTX':<10}")
-    print("-" * 90)
-    for r in records:
-        size_str = f"{r.size_bytes / (1024*1024):.1f} MB" if r.size_bytes < 1024*1024*1024 else f"{r.size_bytes / (1024*1024*1024):.2f} GB"
-        print(f"{r.tag:<45} {r.architecture:<10} {r.quant:<10} {size_str:<10} {r.ctx_max:<10}")
-    print()
+        print(f"\n{'TAG':<45} {'ARCH':<10} {'QUANT':<10} {'SIZE':<10} {'MAX CTX':<10}")
+        print("-" * 90)
+        for r in models:
+            size_b = r.get("size_bytes", 0)
+            size_str = f"{size_b / (1024*1024):.1f} MB" if size_b < 1024**3 else f"{size_b / (1024**3):.2f} GB"
+            print(f"{r.get('tag', ''):<45} {r.get('architecture', ''):<10} {r.get('quant', ''):<10} {size_str:<10} {r.get('ctx_max', ''):<10}")
+        print()
+    else:
+        registry = ModelRegistry(config.db_path)
+        records = registry.list_models()
+        if not records:
+            print("No models found in local storage.")
+            print("Pull a model with: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m")
+            return
+
+        print(f"\n{'TAG':<45} {'ARCH':<10} {'QUANT':<10} {'SIZE':<10} {'MAX CTX':<10}")
+        print("-" * 90)
+        for r in records:
+            size_str = f"{r.size_bytes / (1024*1024):.1f} MB" if r.size_bytes < 1024*1024*1024 else f"{r.size_bytes / (1024*1024*1024):.2f} GB"
+            print(f"{r.tag:<45} {r.architecture:<10} {r.quant:<10} {size_str:<10} {r.ctx_max:<10}")
+        print()
 
 def cmd_show(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -103,13 +124,99 @@ def cmd_show(args: argparse.Namespace) -> None:
     print(f" Analysis:            {bandwidth.explanation}")
     print("=" * 75 + "\n")
 
-def cmd_run(args: argparse.Namespace) -> None:
-    config = LLMHubConfig()
+def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
+    if args.prompt:
+        messages = []
+        if args.system:
+            messages.append({"role": "system", "content": args.system})
+        messages.append({"role": "user", "content": args.prompt})
+
+        last_usage = {}
+        try:
+            for chunk in client.stream_chat(
+                model=args.model,
+                messages=messages,
+                max_tokens=args.max_tokens,
+                temperature=args.temperature
+            ):
+                token_text = chunk.get("token", "")
+                if token_text:
+                    sys.stdout.write(token_text)
+                    sys.stdout.flush()
+                if chunk.get("usage"):
+                    last_usage = chunk["usage"]
+        except KeyboardInterrupt:
+            sys.stdout.write("\n[Interrupted]")
+
+        sys.stdout.write("\n\n")
+        if last_usage:
+            sys.stdout.write(
+                f"[{last_usage.get('completion_tokens', 0)} tokens | "
+                f"TTFT: {last_usage.get('ttft_ms', 0):.1f}ms | "
+                f"Speed: {last_usage.get('decode_tok_s', 0):.1f} tok/s]\n"
+            )
+    else:
+        print("=" * 65)
+        print(f" LLMHub Interactive Chat Client (Connected to HTTP Daemon)")
+        print(f" Model: {args.model}")
+        print(" Type '/bye', 'exit', or 'quit' to end session.")
+        print("=" * 65 + "\n")
+
+        history: list[dict[str, str]] = []
+        if args.system:
+            history.append({"role": "system", "content": args.system})
+
+        while True:
+            try:
+                user_input = input("\n>>> ").strip()
+            except (KeyboardInterrupt, EOFError):
+                print("\nExiting session.")
+                break
+
+            if not user_input:
+                continue
+
+            if user_input.lower() in ("/bye", "exit", "quit"):
+                print("Session terminated.")
+                break
+
+            history.append({"role": "user", "content": user_input})
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+
+            bot_reply = ""
+            last_usage = {}
+            try:
+                for chunk in client.stream_chat(
+                    model=args.model,
+                    messages=history,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature
+                ):
+                    token_text = chunk.get("token", "")
+                    if token_text:
+                        sys.stdout.write(token_text)
+                        sys.stdout.flush()
+                        bot_reply += token_text
+                    if chunk.get("usage"):
+                        last_usage = chunk["usage"]
+            except KeyboardInterrupt:
+                sys.stdout.write("\n[Interrupted]")
+
+            sys.stdout.write("\n")
+            if last_usage:
+                sys.stdout.write(
+                    f"[{last_usage.get('completion_tokens', 0)} tokens | "
+                    f"TTFT: {last_usage.get('ttft_ms', 0):.1f}ms | "
+                    f"Speed: {last_usage.get('decode_tok_s', 0):.1f} tok/s]\n"
+                )
+            history.append({"role": "assistant", "content": bot_reply})
+
+def _run_standalone(config: LLMHubConfig, args: argparse.Namespace) -> None:
     registry = ModelRegistry(config.db_path)
     record = registry.find_model(args.model)
 
     if not record:
-        # Check if argument is a direct GGUF file path
         candidate_path = Path(args.model).resolve()
         if candidate_path.is_file() and candidate_path.suffix.lower() == ".gguf":
             model_path = candidate_path
@@ -132,7 +239,6 @@ def cmd_run(args: argparse.Namespace) -> None:
     )
 
     if args.prompt:
-        # One-shot mode
         messages = []
         if args.system:
             messages.append({"role": "system", "content": args.system})
@@ -160,7 +266,6 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
         runner.close()
     else:
-        # Interactive REPL mode
         try:
             runner.chat_repl(
                 system_prompt=args.system,
@@ -169,6 +274,75 @@ def cmd_run(args: argparse.Namespace) -> None:
             )
         finally:
             runner.close()
+
+def cmd_run(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
+
+    use_http = not getattr(args, "local", False) and client.is_server_running()
+
+    if not getattr(args, "local", False) and not use_http:
+        sys.stdout.write(f"[INFO] Server not detected at http://{host}:{port}. Running in standalone mode.\n")
+        sys.stdout.write(f"       (Tip: run 'llmhub serve' to enable HTTP/OpenAI API daemon)\n\n")
+
+    if use_http:
+        _run_via_http(client, args)
+    else:
+        _run_standalone(config, args)
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = args.host or server_cfg.get("host", "127.0.0.1")
+    port = args.port or server_cfg.get("port", 11434)
+    run_server(host=host, port=port, config=config)
+
+def cmd_ps(args: argparse.Namespace) -> None:
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
+
+    if not client.is_server_running():
+        sys.stderr.write(f"[ERROR] LLMHub server is not running on http://{host}:{port}.\n")
+        sys.stderr.write(f"Start the server using:\n  llmhub serve\n")
+        sys.exit(1)
+
+    try:
+        ps_data = client.get_ps()
+    except Exception as e:
+        sys.stderr.write(f"[ERROR] Failed to query /api/ps: {e}\n")
+        sys.exit(1)
+
+    model = ps_data.get("model")
+    status = ps_data.get("backend_status", "unloaded")
+    sessions = ps_data.get("active_sessions", 0)
+    mem = ps_data.get("memory", {})
+    bw = ps_data.get("bandwidth", {})
+
+    print("=" * 80)
+    print(" LLMHUB ACTIVE PROCESSES & RESIDENT MODELS (/api/ps)")
+    print("=" * 80)
+    if not model or status == "unloaded":
+        print(" No models currently resident in memory.")
+        print(f" System Free RAM:      {ps_data.get('system_ram_free_mb', 0):.1f} MB")
+        print(f" Tuned Worker Threads: {ps_data.get('suggested_threads', 1)}")
+    else:
+        print(f"{'MODEL':<40} {'STATUS':<10} {'SESSIONS':<10} {'RAM USAGE':<18}")
+        print("-" * 80)
+        tot_mb = mem.get("total_mb", 0)
+        weights_mb = mem.get("weights_mb", 0)
+        kv_mb = mem.get("kv_cache_mb", 0)
+        ram_desc = f"{tot_mb:.1f} MB ({weights_mb:.0f}W + {kv_mb:.0f}KV)"
+        print(f"{model:<40} {status.upper():<10} {sessions:<10} {ram_desc:<18}")
+        print("-" * 80)
+        print(f" Peak Theoretical Bandwidth: {bw.get('theoretical_max_tok_s', 0):.1f} tok/s")
+        print(f" Bottleneck Nature:          {bw.get('bottleneck', 'Memory-Bandwidth Bound')}")
+    print("=" * 80 + "\n")
 
 def cmd_rm(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -327,7 +501,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("-t", "--threads", type=int, default=None, help="Number of CPU worker threads")
     p_run.add_argument("-m", "--max-tokens", type=int, default=512, help="Maximum generated tokens")
     p_run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
+    p_run.add_argument("--local", action="store_true", help="Force local direct execution without HTTP daemon")
     p_run.set_defaults(func=cmd_run)
+
+    # serve
+    p_serve = subparsers.add_parser("serve", help="Start the LLMHub HTTP API server daemon")
+    p_serve.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
+    p_serve.add_argument("--port", type=int, default=None, help="Bind port (default: 11434)")
+    p_serve.set_defaults(func=cmd_serve)
+
+    # ps
+    p_ps = subparsers.add_parser("ps", help="Show active running models, sessions, and memory (/api/ps)")
+    p_ps.set_defaults(func=cmd_ps)
 
     # list
     p_list = subparsers.add_parser("list", help="List all locally installed models")

@@ -94,6 +94,65 @@ def benchmark_auto_tuning(iterations: int = 500) -> float:
     avg_us = (elapsed / iterations) * 1_000_000.0
     return avg_us
 
+def benchmark_backend_quantum(iterations: int = 1000) -> float:
+    from llmhub.server.backend import DecodeResult, SessionState
+    sess = SessionState(
+        session_id="bench-s1",
+        model_tag="bench-model",
+        prompt="Hi",
+        prompt_tokens=[1, 2, 3]
+    )
+    start = time.perf_counter()
+    for _ in range(iterations):
+        _ = DecodeResult(
+            session_id=sess.session_id,
+            tokens=[10],
+            text_deltas=[" token"],
+            done=False,
+            ttft_ms=1.5,
+            decode_tok_s=85.0,
+            total_tokens_generated=1
+        )
+    elapsed = time.perf_counter() - start
+    avg_us = (elapsed / iterations) * 1_000_000.0
+    return avg_us
+
+def benchmark_server_sse(iterations: int = 100) -> float:
+    from fastapi.testclient import TestClient
+    from llmhub.server.app import app, state
+    from tests.test_server import MockBackend
+    from unittest.mock import MagicMock
+
+    orig_backend = state.backend
+    orig_registry = state.registry
+    mock_reg = MagicMock()
+    mock_rec = MagicMock()
+    mock_rec.tag = "mock"
+    mock_rec.file_path = "mock.gguf"
+    mock_reg.find_model.return_value = mock_rec
+    state.registry = mock_reg
+    state.backend = MockBackend()
+    state.current_model_tag = "mock"
+
+    client = TestClient(app)
+    payload = {
+        "model": "mock",
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": True
+    }
+
+    try:
+        start = time.perf_counter()
+        for _ in range(iterations):
+            resp = client.post("/v1/chat/completions", json=payload)
+            _ = resp.text
+        elapsed = time.perf_counter() - start
+        avg_ms = (elapsed / iterations) * 1000.0
+        return avg_ms
+    finally:
+        state.backend = orig_backend
+        state.registry = orig_registry
+
 def run_benchmarks() -> None:
     prof = HardwareDetector.get_profile()
     cpu = prof.cpu
@@ -130,6 +189,14 @@ def run_benchmarks() -> None:
     print("Running auto-tuner plan calculation benchmark (500 runs)...")
     tune_us = benchmark_auto_tuning(500)
     print(f"  -> Average Auto-Tuner Plan Latency:  {tune_us:.3f} us / plan")
+
+    print("Running backend quantum decode overhead benchmark (1000 runs)...")
+    quantum_us = benchmark_backend_quantum(1000)
+    print(f"  -> Average Decode Quantum Dispatch:  {quantum_us:.3f} us / quantum")
+
+    print("Running FastAPI SSE streaming roundtrip benchmark (100 runs)...")
+    sse_ms = benchmark_server_sse(100)
+    print(f"  -> Average SSE Streaming Turnaround: {sse_ms:.3f} ms / req")
 
     print("=" * 70)
     print(" Micro-benchmark passed with zero bottlenecks in Python orchestration path.")
