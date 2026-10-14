@@ -48,6 +48,8 @@ echo -e "\n${BOLD}[2/5] Installing native build toolchain and libraries...${NC}"
 if command -v pkg >/dev/null 2>&1; then
     pkg install -y \
         python \
+        python-psutil \
+        ninja \
         clang \
         cmake \
         make \
@@ -88,29 +90,32 @@ export CXXFLAGS="-O3"
 
 # 4. Python Environment & Dependencies
 echo -e "\n${BOLD}[4/5] Installing Python dependencies...${NC}"
-python -m pip install --upgrade pip setuptools wheel
 
-# Install pure-Python core dependencies
-python -m pip install \
+# Install pure-Python dependencies without isolated build sandbox
+python -m pip install --no-build-isolation \
     toml \
     jinja2 \
-    psutil \
     fastapi \
     uvicorn \
     requests \
-    pydantic
+    pydantic \
+    httpx \
+    rich
 
 # Install llama-cpp-python with OpenBLAS / ARM NEON support
 echo -e "Installing llama-cpp-python with OpenBLAS C bindings (this may take a few minutes)..."
-python -m pip install llama-cpp-python --no-cache-dir || {
+python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir || {
     echo -e "${YELLOW}[WARN] OpenBLAS compilation failed; falling back to standard CPU build...${NC}"
-    CMAKE_ARGS="" python -m pip install llama-cpp-python --no-cache-dir
+    CMAKE_ARGS="" python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir || {
+        echo -e "${YELLOW}[WARN] llama-cpp-python wheel compilation skipped.${NC}"
+        echo -e "       (LLMHub will operate with remote/mock/cli runtimes)"
+    }
 }
 
 # Install LLMHub package in current directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo -e "Installing LLMHub from ${SCRIPT_DIR}..."
-python -m pip install -e "${SCRIPT_DIR}"
+python -m pip install --no-build-isolation -e "${SCRIPT_DIR}"
 
 # 5. Initialize Directory Layout & Wake-Lock Test
 echo -e "\n${BOLD}[5/5] Initializing ~/.llmhub storage layout and wake-lock...${NC}"
