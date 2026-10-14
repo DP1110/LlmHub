@@ -99,14 +99,20 @@ class TokenRoundRobinScheduler:
                     pass
 
             if session.admitted:
-                loaded.active_sessions = max(0, loaded.active_sessions - 1)
+                if hasattr(loaded, "dec_active_sessions"):
+                    loaded.dec_active_sessions()
+                else:
+                    loaded.active_sessions = max(0, loaded.active_sessions - 1)
                 session.admitted = False
             session.slot_id = None
 
         if session.use_speculative and session.draft_model_tag:
             draft_loaded = self.model_manager.get_model(session.draft_model_tag)
             if draft_loaded:
-                draft_loaded.active_sessions = max(0, draft_loaded.active_sessions - 1)
+                if hasattr(draft_loaded, "dec_active_sessions"):
+                    draft_loaded.dec_active_sessions()
+                else:
+                    draft_loaded.active_sessions = max(0, draft_loaded.active_sessions - 1)
                 async with draft_loaded.inference_lock:
                     try:
                         await asyncio.to_thread(draft_loaded.backend.close_session, session.session_id)
@@ -175,7 +181,10 @@ class TokenRoundRobinScheduler:
                         s.slot_id = allocated.slot_id
                         s.metrics.start_time = s.metrics.start_time or time.monotonic()
                         s.admitted = True
-                        loaded_model.active_sessions += 1
+                        if hasattr(loaded_model, "inc_active_sessions"):
+                            loaded_model.inc_active_sessions()
+                        else:
+                            loaded_model.active_sessions += 1
                         loaded_model.last_active_time = time.monotonic()
 
         # 3. Execute batch step on background worker thread
@@ -460,7 +469,10 @@ class TokenRoundRobinScheduler:
             session.metrics.start_time = time.monotonic()
             session.phase = SessionPhase.PREFILLING
             session.admitted = True
-            loaded_model.active_sessions += 1
+            if hasattr(loaded_model, "inc_active_sessions"):
+                loaded_model.inc_active_sessions()
+            else:
+                loaded_model.active_sessions += 1
             loaded_model.last_active_time = time.monotonic()
 
             try:
@@ -562,7 +574,10 @@ class TokenRoundRobinScheduler:
 
                 # Ensure draft session is initialized
                 if not draft_model.backend.get_session(session.session_id):
-                    draft_model.active_sessions += 1
+                    if hasattr(draft_model, "inc_active_sessions"):
+                        draft_model.inc_active_sessions()
+                    else:
+                        draft_model.active_sessions += 1
                     draft_model.last_active_time = time.monotonic()
                     try:
                         async with draft_model.inference_lock:

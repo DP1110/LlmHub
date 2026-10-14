@@ -1,8 +1,8 @@
 {
   "project": "LLMHub",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
-  "branchName": "phase-8-termux-low-memory",
+  "branchName": "phase-9-observability-hardening",
   "overview": {
     "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
@@ -565,6 +565,111 @@
         "CLI `llmhub termux` displays battery/thermal/LMK/wakelock status",
         "HTTP endpoint `/api/termux/status` exposes JSON status for remote monitoring",
         "CLI flag `--low-mem` enables aggressive resource conservation"
+      ]
+    },
+    {
+      "id": "US-045",
+      "title": "Prometheus Metrics Exporter (/metrics)",
+      "phase": 9,
+      "description": "Expose runtime Prometheus metrics endpoint for active sessions, queued requests, TTFT, tokens/sec, KV cache bytes, resident models, and system health.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Pure Python Prometheus text exposition format (/metrics) with zero external exporter dependencies",
+        "Tracks counters: llmhub_requests_total, llmhub_tokens_generated_total, llmhub_prompt_tokens_total, prefix cache hits/misses",
+        "Tracks gauges: llmhub_active_sessions, llmhub_queued_sessions, llmhub_loaded_models_count, llmhub_memory_allocated_bytes, thermal temp, LMK pressure",
+        "Tracks histograms: llmhub_ttft_seconds and llmhub_request_duration_seconds with appropriate bucket distributions"
+      ]
+    },
+    {
+      "id": "US-046",
+      "title": "Structured JSON Logging & Request Correlation Tracing",
+      "phase": 9,
+      "description": "Implement structured JSON logging with ContextVar-based request correlation IDs (X-Request-ID) and log rotation in ~/.llmhub/logs/llmhub.log.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Propagate request/trace IDs across async tasks and attach to HTTP response headers (X-Request-ID)",
+        "Structured JSON log formatter with timestamp, level, logger, trace_id, and metadata",
+        "Rotating file handler configured in ~/.llmhub/logs/llmhub.log (10MB limit with backup rotation)",
+        "Configurable log levels via config.toml or CLI flags"
+      ]
+    },
+    {
+      "id": "US-047",
+      "title": "Crash Recovery, PID Watchdog, & Run-Directory Cleanup",
+      "phase": 9,
+      "description": "Manage daemon PID lifecycle in ~/.llmhub/run/llmhub.pid, detect and recover from stale crash locks, handle OS termination signals (SIGINT/SIGTERM), and abort orphaned sessions upon client disconnect.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "PID file tracking with PID, host, port, startup timestamp, and version",
+        "Detect stale or dead process PIDs and safely reclaim locks on startup",
+        "Graceful signal handlers clean up PID files, stop background loops, and release wakelocks",
+        "Detect client disconnections (Request.is_disconnected()) and immediately cancel orphaned inference sessions"
+      ]
+    },
+    {
+      "id": "US-048",
+      "title": "Graceful Model Unloading & Request Draining",
+      "phase": 9,
+      "description": "Implement request draining during model unloading or server shutdown, rejecting new requests with HTTP 503 while letting active in-flight requests finish cleanly within a timeout.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Model unloading supports drain=true and configurable drain_timeout_s",
+        "Transition model to DRAINING state: immediately reject new requests for that model with HTTP 503",
+        "Wait for active sessions to finish with async notification; forcibly cancel if timeout expires",
+        "Server shutdown drains all models and active queues before terminating"
+      ]
+    },
+    {
+      "id": "US-049",
+      "title": "API Key Authentication & Token Bucket Rate Limiting",
+      "phase": 9,
+      "description": "Provide Bearer token API key authentication with configurable per-key Token Bucket rate limiters (RPM and TPM), returning standard HTTP 401 and 429 status codes.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Validate Authorization: Bearer <token> against configured api_keys in config.toml",
+        "Support bypass for exempt endpoints (/healthz, /metrics when enabled) and localhost whitelist",
+        "Per-key Token Bucket algorithm enforcing Requests Per Minute (RPM) and Tokens Per Minute (TPM)",
+        "Return HTTP 429 with standard Retry-After and X-RateLimit headers upon bucket exhaustion"
+      ]
+    },
+    {
+      "id": "US-050",
+      "title": "Request Validation, Size Limits, & Input Sanitization",
+      "phase": 9,
+      "description": "Enforce maximum request body payload limits (HTTP 413), prompt token bounds checking against model context window, null byte / control character sanitization, and strict input validation.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Reject requests exceeding max_body_size_bytes with HTTP 413 Payload Too Large",
+        "Strip dangerous control characters (e.g. \\x00) to protect backend C memory buffers",
+        "Validate prompt token count does not exceed model context limit before enqueuing",
+        "Validate chat message structures and roles (system, user, assistant)"
+      ]
+    },
+    {
+      "id": "US-051",
+      "title": "Configuration Schema Strict Validation",
+      "phase": 9,
+      "description": "Enforce strict schema validation on config.toml at startup, catching invalid types, out-of-range values, or malformed sections with actionable error diagnostics.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Validate all sections and keys against strongly-typed schema rules",
+        "Check ranges for numeric parameters (ports 1-65535, temperatures >= 0, ratios 0.0-1.0)",
+        "Provide descriptive error messages pinpointing invalid keys with helpful correction hints",
+        "Ensure default fallback without crashes when config is absent or partially specified"
+      ]
+    },
+    {
+      "id": "US-052",
+      "title": "Observability & Hardening Tests and Benchmarks",
+      "phase": 9,
+      "description": "Deliver a comprehensive test suite covering metrics, logging, crash recovery, draining, auth, rate limiting, and sanitization, along with benchmark measurements.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Unit tests for Prometheus metrics serialization and accuracy",
+        "Unit tests for structured logging, trace ID injection, and file rotation",
+        "Unit and integration tests for PID management, crash recovery, and request draining",
+        "Unit tests for API key auth, Token Bucket rate limiting, and input sanitization",
+        "Benchmark measuring /metrics response time and middleware latency overhead"
       ]
     }
   ]

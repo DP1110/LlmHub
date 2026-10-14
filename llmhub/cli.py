@@ -282,7 +282,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     server_cfg = config.settings.get("server", {})
     host = server_cfg.get("host", "127.0.0.1")
     port = server_cfg.get("port", 11434)
-    client = LLMHubClient(base_url=f"http://{host}:{port}")
+    client = LLMHubClient(base_url=f"http://{host}:{port}", api_key=getattr(args, "api_key", None))
 
     use_http = not getattr(args, "local", False) and client.is_server_running()
 
@@ -585,12 +585,68 @@ def cmd_termux(args: argparse.Namespace) -> None:
         print(f"   PSI Stall (full): {mp['psi_full_avg10']:.2f}%")
     print("=" * 75 + "\n")
 
+def cmd_status(args: argparse.Namespace) -> None:
+    from llmhub.core.lifecycle import PIDManager, is_process_alive
+    config = LLMHubConfig()
+    pid_mgr = PIDManager(config.run_dir)
+    pid_info = pid_mgr.read_pid_info()
+
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}", api_key=getattr(args, "api_key", None))
+
+    print("=" * 75)
+    print(" LLMHUB DAEMON & OBSERVABILITY STATUS")
+    print("=" * 75)
+
+    is_running = client.is_server_running()
+    if pid_info:
+        pid = pid_info.get("pid")
+        alive = is_process_alive(pid) if pid else False
+        state_str = "RUNNING (ACTIVE)" if alive and is_running else ("STALE LOCK (DEAD)" if not alive else "STARTING")
+        print(f" Daemon State:       {state_str}")
+        print(f" Process ID (PID):   {pid} (Alive: {alive})")
+        print(f" Configured Address: http://{pid_info.get('host')}:{pid_info.get('port')}")
+        print(f" Started At:         {pid_info.get('started_at')}")
+        print(f" Runtime Version:    {pid_info.get('version')}")
+    else:
+        print(f" Daemon State:       STOPPED (No active PID file at {pid_mgr.pid_file})")
+
+    print("-" * 75)
+    if is_running:
+        try:
+            import httpx
+            with httpx.Client(timeout=3.0) as http_c:
+                hz = http_c.get(f"http://{host}:{port}/healthz").json()
+                print(f" HTTP Health:        {hz.get('status', 'unknown').upper()}")
+                print(f" Uptime:             {hz.get('uptime_seconds', 0.0):.1f}s")
+                print(f" Resident Models:    {hz.get('resident_models_count', 0)} loaded")
+                if hz.get('resident_models'):
+                    for m in hz['resident_models']:
+                        print(f"   - {m}")
+                termux_info = hz.get("termux", {})
+                if termux_info:
+                    print(f" Thermal State:      {termux_info.get('thermal_state')}")
+                    print(f" Memory Pressure:    {termux_info.get('memory_pressure')}")
+                    print(f" Low-Memory Mode:    {termux_info.get('low_memory_mode')}")
+        except Exception as e:
+            print(f" [!] Error fetching healthz: {e}")
+    else:
+        print(" HTTP Health:        OFFLINE")
+    print("=" * 75 + "\n")
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llmhub",
         description="LLMHub: Offline-First High-Performance GGUF Model Runtime Platform"
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    # status
+    p_status = subparsers.add_parser("status", help="Inspect server daemon process, health, and observability metrics")
+    p_status.add_argument("--api-key", default=None, help="Optional API key for authenticated endpoints")
+    p_status.set_defaults(func=cmd_status)
 
     # pull
     p_pull = subparsers.add_parser("pull", help="Download a model from Hugging Face")
@@ -608,6 +664,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")
     p_run.add_argument("--low-mem", action="store_true", help="Enable low-memory mode with context downshifting")
     p_run.add_argument("--local", action="store_true", help="Force local direct execution without HTTP daemon")
+    p_run.add_argument("--api-key", default=None, help="API key for HTTP server authentication")
     p_run.set_defaults(func=cmd_run)
 
     # serve
@@ -615,6 +672,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=None, help="Bind port (default: 11434)")
     p_serve.add_argument("--low-mem", action="store_true", help="Start server in low-memory mode")
+    p_serve.add_argument("--log-level", default=None, help="Log level (DEBUG, INFO, WARNING, ERROR)")
     p_serve.set_defaults(func=cmd_serve)
 
     # termux

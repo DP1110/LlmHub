@@ -12,7 +12,7 @@ Storage layout:
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 import toml
 
 # Environment variable to override base directory
@@ -88,6 +88,24 @@ class LLMHubConfig:
                 "low_memory_mode": False,
                 "allow_ctx_downshift": True,
                 "min_ctx_size": 512,
+            },
+            "observability": {
+                "metrics_enabled": True,
+                "log_level": "INFO",
+                "log_json": True,
+            },
+            "security": {
+                "auth_enabled": False,
+                "api_keys": [],
+                "key_configs": {},
+                "rate_limit_enabled": True,
+                "default_rpm": 60,
+                "default_tpm": 30000,
+                "max_request_body_bytes": 4 * 1024 * 1024,  # 4 MB
+                "exempt_localhost": True,
+            },
+            "lifecycle": {
+                "drain_timeout_s": 30.0,
             }
         }
 
@@ -148,4 +166,104 @@ class LLMHubConfig:
             self.settings["batch"]["max_cached_tokens"] = min(
                 8192, self.settings.get("batch", {}).get("max_cached_tokens", 32768)
             )
+
+    def validate(self, strict: bool = False) -> List[str]:
+        """Validate currently loaded configuration settings."""
+        errors = validate_config_schema(self.settings)
+        if errors:
+            msg = f"Configuration validation warnings in {self.config_path}: {'; '.join(errors)}"
+            if strict:
+                raise ConfigValidationError(msg)
+            sys.stderr.write(f"[WARN] {msg}\n")
+        return errors
+
+
+class ConfigValidationError(ValueError):
+    """Raised when configuration values fail strict schema constraints."""
+    pass
+
+
+def validate_config_schema(settings: Dict[str, Any]) -> List[str]:
+    """Validate configuration dictionary against strict schema rules.
+    
+    Returns a list of error diagnostic messages.
+    """
+    errors: List[str] = []
+    known_sections = {
+        "server", "runtime", "scheduler", "batch", "storage",
+        "termux", "observability", "security", "lifecycle"
+    }
+
+    for section in settings.keys():
+        if section not in known_sections:
+            errors.append(f"Unknown configuration section '[{section}]'")
+
+    # 1. Server section
+    server = settings.get("server", {})
+    if "port" in server:
+        port = server["port"]
+        if not isinstance(port, int) or port < 1 or port > 65535:
+            errors.append(f"server.port must be an integer between 1 and 65535 (got {port!r})")
+    if "host" in server and not isinstance(server["host"], str):
+        errors.append(f"server.host must be a string (got {server['host']!r})")
+
+    # 2. Runtime section
+    runtime = settings.get("runtime", {})
+    if "memory_safety_margin" in runtime:
+        margin = runtime["memory_safety_margin"]
+        if not isinstance(margin, (int, float)) or margin <= 0.0 or margin > 1.0:
+            errors.append(f"runtime.memory_safety_margin must be a float in (0.0, 1.0] (got {margin!r})")
+    if "default_threads" in runtime:
+        threads = runtime["default_threads"]
+        if not isinstance(threads, int) or threads < 1:
+            errors.append(f"runtime.default_threads must be an integer >= 1 (got {threads!r})")
+    if "default_context_size" in runtime:
+        ctx = runtime["default_context_size"]
+        if not isinstance(ctx, int) or ctx < 64:
+            errors.append(f"runtime.default_context_size must be an integer >= 64 (got {ctx!r})")
+
+    # 3. Scheduler section
+    sched = settings.get("scheduler", {})
+    if "quantum_tokens" in sched:
+        q = sched["quantum_tokens"]
+        if not isinstance(q, int) or q < 1:
+            errors.append(f"scheduler.quantum_tokens must be an integer >= 1 (got {q!r})")
+    if "prefill_chunk_size" in sched:
+        p = sched["prefill_chunk_size"]
+        if not isinstance(p, int) or p < 1:
+            errors.append(f"scheduler.prefill_chunk_size must be an integer >= 1 (got {p!r})")
+    if "threading_mode" in sched:
+        mode = sched["threading_mode"]
+        if mode not in ("time-slice", "partition", "hybrid"):
+            errors.append(f"scheduler.threading_mode must be one of 'time-slice', 'partition', 'hybrid' (got {mode!r})")
+
+    # 4. Security section
+    sec = settings.get("security", {})
+    if "default_rpm" in sec:
+        rpm = sec["default_rpm"]
+        if not isinstance(rpm, int) or rpm < 1:
+            errors.append(f"security.default_rpm must be an integer >= 1 (got {rpm!r})")
+    if "default_tpm" in sec:
+        tpm = sec["default_tpm"]
+        if not isinstance(tpm, int) or tpm < 1:
+            errors.append(f"security.default_tpm must be an integer >= 1 (got {tpm!r})")
+    if "max_request_body_bytes" in sec:
+        max_b = sec["max_request_body_bytes"]
+        if not isinstance(max_b, int) or max_b < 1024:
+            errors.append(f"security.max_request_body_bytes must be an integer >= 1024 (got {max_b!r})")
+
+    # 5. Termux section
+    termux = settings.get("termux", {})
+    warn_t = termux.get("thermal_warning_temp_c")
+    crit_t = termux.get("thermal_critical_temp_c")
+    if warn_t is not None and (not isinstance(warn_t, (int, float)) or warn_t <= 0):
+        errors.append(f"termux.thermal_warning_temp_c must be a positive number (got {warn_t!r})")
+    if crit_t is not None and (not isinstance(crit_t, (int, float)) or crit_t <= 0):
+        errors.append(f"termux.thermal_critical_temp_c must be a positive number (got {crit_t!r})")
+    if warn_t is not None and crit_t is not None and isinstance(warn_t, (int, float)) and isinstance(crit_t, (int, float)):
+        if crit_t <= warn_t:
+            errors.append(f"termux.thermal_critical_temp_c ({crit_t}) must be greater than thermal_warning_temp_c ({warn_t})")
+
+    return errors
+
 

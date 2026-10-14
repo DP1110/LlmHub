@@ -486,6 +486,9 @@ def run_benchmarks() -> None:
     # Phase 8 Termux & Low-Memory Mode
     benchmark_termux_low_memory()
 
+    # Phase 9 Observability & Hardening
+    benchmark_observability_hardening()
+
 def benchmark_termux_low_memory() -> None:
     from llmhub.termux.thermal import ThermalMonitor
     from llmhub.termux.memory_pressure import MemoryPressureMonitor
@@ -541,6 +544,77 @@ def benchmark_termux_low_memory() -> None:
         cache.prune_memory_pressure(ratio=0.1)
     prune_us = ((time.perf_counter() - start) / n_prune) * 1_000_000.0
     print(f" Prefix Cache Pressure Pruning:       {prune_us:.3f} us / prune")
+    print("=" * 80)
+
+def benchmark_observability_hardening() -> None:
+    from llmhub.observability.metrics import MetricsRegistry
+    from llmhub.security.auth import TokenBucket, RateLimiter
+    from llmhub.security.sanitizer import InputSanitizer
+    from llmhub.observability.logger import current_request_id, JSONFormatter
+    import logging
+
+    print("\n" + "=" * 80)
+    print(" PHASE 9 OBSERVABILITY & SECURITY HARDENING OVERHEAD BENCHMARK")
+    print("=" * 80)
+
+    # 1. Prometheus metrics serialization latency
+    reg = MetricsRegistry()
+    for i in range(10):
+        reg.requests_total.inc(1, labels={"model": f"model_{i}", "status": "success", "tenant": "default"})
+        reg.ttft_seconds.observe(0.045 + i * 0.005, labels={"model": f"model_{i}"})
+    n_metrics = 500
+    start = time.perf_counter()
+    for _ in range(n_metrics):
+        _ = reg.export()
+    metrics_us = ((time.perf_counter() - start) / n_metrics) * 1_000_000.0
+    print(f" Prometheus Text Exposition Serialization:{metrics_us:.3f} us / scrape")
+
+    # 2. TokenBucket rate limiter check latency
+    bucket = TokenBucket(capacity=100.0, refill_rate_per_sec=10.0)
+    n_bucket = 10000
+    start = time.perf_counter()
+    for _ in range(n_bucket):
+        bucket.consume(1.0)
+    bucket_us = ((time.perf_counter() - start) / n_bucket) * 1_000_000.0
+    print(f" TokenBucket Consume Check Overhead:      {bucket_us:.3f} us / check")
+
+    # 3. Input sanitizer latency on prompt string
+    sample_prompt = "Hello \x00world! This is a test \x08message with \n legitimate newlines and \t tabs." * 5
+    n_clean = 5000
+    start = time.perf_counter()
+    for _ in range(n_clean):
+        InputSanitizer.sanitize_text(sample_prompt)
+    clean_us = ((time.perf_counter() - start) / n_clean) * 1_000_000.0
+    print(f" Input Sanitizer (Regex & Control Strip): {clean_us:.3f} us / prompt")
+
+    # 4. ContextVar trace ID propagation overhead
+    n_trace = 10000
+    start = time.perf_counter()
+    for _ in range(n_trace):
+        t = current_request_id.set("req-test-1234")
+        _ = current_request_id.get()
+        current_request_id.reset(t)
+    trace_us = ((time.perf_counter() - start) / n_trace) * 1_000_000.0
+    print(f" ContextVar Trace ID Propagation Overhead:{trace_us:.3f} us / context switch")
+
+    # 5. Structured JSON log formatting latency
+    rec = logging.LogRecord(
+        name="llmhub.bench",
+        level=logging.INFO,
+        pathname="bench.py",
+        lineno=42,
+        msg="Inference request completed successfully",
+        args=(),
+        exc_info=None,
+    )
+    rec.trace_id = "req-bench-9999"
+    fmt = JSONFormatter()
+    n_json = 5000
+    start = time.perf_counter()
+    for _ in range(n_json):
+        _ = fmt.format(rec)
+    json_us = ((time.perf_counter() - start) / n_json) * 1_000_000.0
+    print(f" Structured JSON Log Formatting Overhead: {json_us:.3f} us / log record")
     print("=" * 80)
 
 if __name__ == "__main__":

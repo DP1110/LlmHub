@@ -13,14 +13,26 @@ class ServerUnavailableError(Exception):
 class LLMHubClient:
     """Client for interacting with local LLMHub HTTP daemon."""
 
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", timeout: float = 60.0):
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        timeout: float = 60.0,
+        api_key: Optional[str] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.api_key = api_key
+
+    def _get_headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def is_server_running(self) -> bool:
         """Check if local server daemon is reachable."""
         try:
-            with httpx.Client(timeout=1.5) as client:
+            with httpx.Client(timeout=1.5, headers=self._get_headers()) as client:
                 resp = client.get(f"{self.base_url}/healthz")
                 return resp.status_code == 200
         except Exception:
@@ -37,7 +49,7 @@ class LLMHubClient:
 
     def list_models(self) -> List[Dict[str, Any]]:
         self.check_connection()
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
             resp = client.get(f"{self.base_url}/api/models")
             if resp.status_code != 200:
                 raise RuntimeError(f"Error fetching models: HTTP {resp.status_code} - {resp.text}")
@@ -45,15 +57,23 @@ class LLMHubClient:
 
     def get_ps(self) -> Dict[str, Any]:
         self.check_connection()
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
             resp = client.get(f"{self.base_url}/api/ps")
             if resp.status_code != 200:
                 raise RuntimeError(f"Error fetching ps: HTTP {resp.status_code} - {resp.text}")
             return resp.json()
 
+    def get_metrics(self) -> str:
+        self.check_connection()
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
+            resp = client.get(f"{self.base_url}/metrics")
+            if resp.status_code != 200:
+                raise RuntimeError(f"Error fetching metrics: HTTP {resp.status_code} - {resp.text}")
+            return resp.text
+
     def pin_model(self, model: str) -> Dict[str, Any]:
         self.check_connection()
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
             resp = client.post(f"{self.base_url}/api/models/{model}/pin")
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to pin model: HTTP {resp.status_code} - {resp.text}")
@@ -61,7 +81,7 @@ class LLMHubClient:
 
     def unpin_model(self, model: str) -> Dict[str, Any]:
         self.check_connection()
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
             resp = client.post(f"{self.base_url}/api/models/{model}/unpin")
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to unpin model: HTTP {resp.status_code} - {resp.text}")
@@ -83,16 +103,29 @@ class LLMHubClient:
         if keep_alive is not None:
             params["keep_alive"] = keep_alive
 
-        with httpx.Client(timeout=self.timeout) as client:
+        with httpx.Client(timeout=self.timeout, headers=self._get_headers()) as client:
             resp = client.post(f"{self.base_url}/api/models/{model}/load", params=params)
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to load model: HTTP {resp.status_code} - {resp.text}")
             return resp.json()
 
-    def unload_model(self, model: str, force: bool = False) -> Dict[str, Any]:
+    def unload_model(
+        self,
+        model: str,
+        force: bool = False,
+        drain: bool = False,
+        timeout: float = 30.0,
+    ) -> Dict[str, Any]:
         self.check_connection()
-        params = {"force": "true"} if force else {}
-        with httpx.Client(timeout=self.timeout) as client:
+        params: Dict[str, Any] = {}
+        if force:
+            params["force"] = "true"
+        if drain:
+            params["drain"] = "true"
+        if timeout:
+            params["timeout"] = str(timeout)
+
+        with httpx.Client(timeout=self.timeout + timeout, headers=self._get_headers()) as client:
             resp = client.post(f"{self.base_url}/api/models/{model}/unload", params=params)
             if resp.status_code != 200:
                 raise RuntimeError(f"Failed to unload model: HTTP {resp.status_code} - {resp.text}")
@@ -123,7 +156,7 @@ class LLMHubClient:
             "stop": stop
         }
 
-        with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
+        with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0), headers=self._get_headers()) as client:
             with client.stream("POST", f"{self.base_url}/v1/chat/completions", json=payload) as response:
                 if response.status_code != 200:
                     body = response.read().decode("utf-8", errors="replace")

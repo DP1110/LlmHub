@@ -34,6 +34,12 @@ class MemoryAdmissionError(Exception):
         self.available_bytes = available_bytes
         self.details = details or {}
 
+
+class ModelDrainingError(RuntimeError):
+    """Raised when a request targets a model that is currently draining for unloading."""
+    pass
+
+
 @dataclass
 class LoadedModel:
     tag: str
@@ -53,11 +59,24 @@ class LoadedModel:
     active_sessions: int = 0
     inference_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     batch_engine: Optional[Any] = None
+    is_draining: bool = False
+    drain_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     def __post_init__(self) -> None:
         if self.batch_engine is None:
             from llmhub.batch.engine import ContinuousBatchEngine
             self.batch_engine = ContinuousBatchEngine(model_tag=self.tag, max_slots=4)
+        if self.active_sessions == 0:
+            self.drain_event.set()
+
+    def inc_active_sessions(self) -> None:
+        self.active_sessions += 1
+        self.drain_event.clear()
+
+    def dec_active_sessions(self) -> None:
+        self.active_sessions = max(0, self.active_sessions - 1)
+        if self.active_sessions == 0:
+            self.drain_event.set()
 
     @property
     def is_idle(self) -> bool:
@@ -324,22 +343,66 @@ class ModelManager:
             self.loaded_models[tag] = loaded_model
             return loaded_model
 
-    async def unload_model(self, model_tag: str, force: bool = False) -> bool:
-        """Unload a resident model. If active sessions exist and not force, raises RuntimeError."""
+    async def unload_model(
+        self,
+        model_tag: str,
+        force: bool = False,
+        drain: bool = False,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Unload a resident model.
+        
+        If drain=True and active sessions exist, marks the model as draining and waits up to
+        timeout seconds for all in-flight sessions to finish.
+        If force=False and active sessions remain, raises RuntimeError.
+        """
         async with self.lock:
-            loaded = self.loaded_models.get(model_tag)
+            loaded = self.get_model(model_tag)
+            if not loaded:
+                return False
+            actual_tag = loaded.tag
+            if drain and loaded.active_sessions > 0:
+                loaded.is_draining = True
+
+        if drain and loaded.active_sessions > 0:
+            try:
+                if loaded.active_sessions > 0:
+                    await asyncio.wait_for(loaded.drain_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                if not force:
+                    async with self.lock:
+                        loaded.is_draining = False
+                    raise RuntimeError(
+                        f"Timed out draining {loaded.active_sessions} active sessions from model '{actual_tag}' after {timeout:.1f}s."
+                    )
+            finally:
+                if not force and loaded.active_sessions > 0:
+                    async with self.lock:
+                        loaded.is_draining = False
+
+        async with self.lock:
+            loaded = self.loaded_models.get(actual_tag)
             if not loaded:
                 return False
 
             if loaded.active_sessions > 0 and not force:
                 raise RuntimeError(
-                    f"Cannot unload model '{model_tag}': {loaded.active_sessions} active sessions are in progress."
+                    f"Cannot unload model '{actual_tag}': {loaded.active_sessions} active sessions are in progress."
                 )
 
             async with loaded.inference_lock:
                 loaded.backend.unload()
-                self.loaded_models.pop(model_tag, None)
+                self.loaded_models.pop(actual_tag, None)
             return True
+
+    async def drain_all(self, timeout: float = 30.0) -> None:
+        """Gracefully drain and unload all resident models before server shutdown."""
+        tags = list(self.loaded_models.keys())
+        for tag in tags:
+            try:
+                await self.unload_model(tag, drain=True, timeout=timeout, force=True)
+            except Exception:
+                pass
 
     def get_model(self, model_spec: str) -> Optional[LoadedModel]:
         """Retrieve loaded model if present."""
@@ -355,6 +418,10 @@ class ModelManager:
         """Retrieve loaded model or trigger dynamic load via admission controller."""
         model = self.get_model(model_spec)
         if model:
+            if model.is_draining:
+                raise ModelDrainingError(
+                    f"Model '{model.tag}' is currently draining for unload and cannot accept new requests."
+                )
             model.last_active_time = time.monotonic()
             return model
         return await self.load_model(model_spec)
