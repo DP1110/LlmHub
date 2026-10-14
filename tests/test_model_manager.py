@@ -138,7 +138,7 @@ def test_lru_eviction_under_memory_pressure(mock_registry):
 
                 # Load model-A first
                 mA = await mgr.load_model("model-A")
-                mA.last_active_time = 100.0  # Older usage
+                mA.last_active_time = time.monotonic() - 100.0  # Older usage
                 assert "model-A" in mgr.loaded_models
 
                 # Loading model-B requires evicting model-A because 110 + 110 > 212.5 MB usable!
@@ -147,6 +147,53 @@ def test_lru_eviction_under_memory_pressure(mock_registry):
                 assert "model-B" in mgr.loaded_models
                 assert "model-A" not in mgr.loaded_models
                 assert not mA.backend.is_loaded()
+    asyncio.run(_run())
+
+def test_non_destructive_eviction_on_oversized_request(mock_registry, tmp_path):
+    async def _run():
+        with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=create_mock_metadata()):
+            with patch.object(ModelManager, "get_free_ram_bytes", return_value=250 * 1024 * 1024):
+                mgr = ModelManager(
+                    registry=mock_registry,
+                    backend_factory=lambda: MockBackend(),
+                    safety_margin=0.85
+                )
+
+                # Load healthy model-A
+                mA = await mgr.load_model("model-A")
+                assert "model-A" in mgr.loaded_models
+
+                # Create an impossible 500 MB model that cannot fit even if model-A is evicted (usable = 212.5 MB)
+                p_huge = tmp_path / "huge-model.gguf"
+                p_huge.write_bytes(b"\x00" * (500 * 1024 * 1024))
+                mock_rec = MagicMock()
+                mock_rec.tag = "huge-model"
+                mock_rec.file_path = str(p_huge)
+                mock_registry.find_model.side_effect = lambda spec: mock_rec if spec == "huge-model" else mock_registry.find_model(spec)
+
+                with pytest.raises(MemoryAdmissionError) as exc_info:
+                    await mgr.load_model("huge-model")
+
+                assert "No models were evicted" in str(exc_info.value)
+                # Verify model-A was NOT destructively evicted!
+                assert "model-A" in mgr.loaded_models
+                assert mA.backend.is_loaded()
+    asyncio.run(_run())
+
+def test_pin_unloaded_model_no_deadlock(mock_registry):
+    async def _run():
+        with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=create_mock_metadata()):
+            with patch.object(ModelManager, "get_free_ram_bytes", return_value=16 * 1024 * 1024 * 1024):
+                mgr = ModelManager(
+                    registry=mock_registry,
+                    backend_factory=lambda: MockBackend()
+                )
+
+                # Pin model that is NOT currently loaded - should load and pin without recursive lock deadlock!
+                res = await mgr.pin_model("unloaded-model")
+                assert res is True
+                assert "unloaded-model" in mgr.loaded_models
+                assert mgr.loaded_models["unloaded-model"].pinned is True
     asyncio.run(_run())
 
 def test_model_pinning_prevents_lru_eviction(mock_registry):
@@ -161,7 +208,7 @@ def test_model_pinning_prevents_lru_eviction(mock_registry):
 
                 # Load model-pinned and pin it
                 m_pin = await mgr.load_model("model-pinned", pinned=True)
-                m_pin.last_active_time = 10.0  # Very old
+                m_pin.last_active_time = time.monotonic() - 100.0  # Very old
                 assert m_pin.pinned is True
 
                 # Loading another model that requires memory cannot evict model-pinned, raising MemoryAdmissionError!

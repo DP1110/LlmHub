@@ -401,6 +401,17 @@ def cmd_rm(args: argparse.Namespace) -> None:
     manifest_path = Path(record.manifest_path)
     model_dir = model_path.parent
 
+    # If the daemon server is running, attempt to unload the model first so Windows mmap lock is released
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    client = LLMHubClient(base_url=f"http://{host}:{port}")
+    if client.is_server_running():
+        try:
+            client.unload_model(record.tag)
+        except Exception:
+            pass
+
     try:
         models_root = config.models_dir.resolve()
         resolved_dir = model_dir.resolve()

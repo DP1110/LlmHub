@@ -87,9 +87,9 @@ class ModelManager:
         self._reaper_task: Optional[asyncio.Task] = None
 
     def get_free_ram_bytes(self) -> int:
-        """Query system for currently available unallocated physical RAM."""
-        prof = HardwareDetector.get_profile()
-        return prof.free_ram_bytes
+        """Query system for currently available unallocated physical RAM (fast-path via psutil)."""
+        import psutil
+        return int(psutil.virtual_memory().available)
 
     def calculate_model_memory(
         self,
@@ -146,11 +146,36 @@ class ModelManager:
         Raises MemoryAdmissionError if memory cannot be satisfied even after evicting all idle models.
         Returns list of evicted model tags.
         """
-        can_admit, usable_ram, shortfall = self.check_admission(required_bytes)
+        can_admit, available_ram, shortfall = self.check_admission(required_bytes)
         if can_admit:
             return []
 
         candidates = self.get_eviction_candidates()
+        total_reclaimable = sum(m.total_memory_bytes for m in candidates)
+
+        # Non-destructive pre-check: If even evicting ALL idle candidates cannot satisfy memory requirement, fail immediately
+        if available_ram + total_reclaimable < required_bytes:
+            resident_summary = {
+                m.tag: {
+                    "pinned": m.pinned,
+                    "active_sessions": m.active_sessions,
+                    "ram_mb": round(m.total_memory_bytes / (1024 * 1024), 1)
+                }
+                for m in self.loaded_models.values()
+            }
+            raise MemoryAdmissionError(
+                f"Insufficient memory to load model ({required_bytes / (1024**2):.1f} MB required). "
+                f"Available RAM ({available_ram / (1024**2):.1f} MB) plus all idle models ({total_reclaimable / (1024**2):.1f} MB reclaimable) is insufficient. "
+                f"No models were evicted.",
+                required_bytes=required_bytes,
+                available_bytes=available_ram,
+                details={
+                    "shortfall_mb": round((required_bytes - available_ram - total_reclaimable) / (1024**2), 1),
+                    "evicted_models": [],
+                    "resident_models": resident_summary,
+                }
+            )
+
         evicted_tags: List[str] = []
         freed_bytes = 0
 
@@ -163,32 +188,9 @@ class ModelManager:
             self.loaded_models.pop(tag, None)
 
             # Re-check admission
-            can_admit, usable_ram, shortfall = self.check_admission(required_bytes)
+            can_admit, available_ram, shortfall = self.check_admission(required_bytes)
             if can_admit:
                 break
-
-        if not can_admit:
-            # Reconstruct details for diagnostic error
-            resident_summary = {
-                m.tag: {
-                    "pinned": m.pinned,
-                    "active_sessions": m.active_sessions,
-                    "ram_mb": round(m.total_memory_bytes / (1024 * 1024), 1)
-                }
-                for m in self.loaded_models.values()
-            }
-            raise MemoryAdmissionError(
-                f"Insufficient memory to load model ({required_bytes / (1024**2):.1f} MB required). "
-                f"Available free RAM with {self.safety_margin * 100:.0f}% safety margin is {usable_ram / (1024**2):.1f} MB. "
-                f"All eligible idle models have been evicted. Remaining models are active or pinned.",
-                required_bytes=required_bytes,
-                available_bytes=usable_ram,
-                details={
-                    "shortfall_mb": round(shortfall / (1024**2), 1),
-                    "evicted_models": evicted_tags,
-                    "resident_models": resident_summary,
-                }
-            )
 
         return evicted_tags
 
@@ -250,12 +252,18 @@ class ModelManager:
 
             # Initialize backend
             backend = self.backend_factory()
-            backend.load(
+            use_mlock = self.config.settings.get("runtime", {}).get("use_mlock", False)
+            if HardwareDetector.is_termux() and HardwareDetector.is_non_root():
+                use_mlock = False
+
+            # Offload heavy C++ model weight loading to worker thread
+            await asyncio.to_thread(
+                backend.load,
                 model_path=file_path,
                 n_ctx=ctx,
                 n_threads=threads,
                 use_mmap=True,  # Strictly enforce mmap for page cache sharing
-                use_mlock=self.config.settings.get("runtime", {}).get("use_mlock", False)
+                use_mlock=use_mlock
             )
 
             # Chat template engine
@@ -321,12 +329,12 @@ class ModelManager:
 
     async def pin_model(self, model_spec: str) -> bool:
         """Pin a model into memory, protecting it from LRU eviction and keep-alive expiration."""
+        model = self.get_model(model_spec)
+        if not model:
+            model = await self.load_model(model_spec, pinned=True)
+            return True
         async with self.lock:
-            model = self.get_model(model_spec)
-            if not model:
-                model = await self.load_model(model_spec, pinned=True)
-            else:
-                model.pinned = True
+            model.pinned = True
             return True
 
     async def unpin_model(self, model_spec: str) -> bool:
@@ -379,8 +387,10 @@ class ModelManager:
         prof = HardwareDetector.get_profile()
         models_data = []
 
+        # Snapshot resident models safely to prevent dict iteration mutation race
+        models_snapshot = list(self.loaded_models.values())
         total_resident_mb = 0.0
-        for m in self.loaded_models.values():
+        for m in models_snapshot:
             mb_tot = m.total_memory_bytes / (1024 * 1024)
             total_resident_mb += mb_tot
             bw = estimate_decode_throughput(m.weights_bytes)
@@ -406,10 +416,10 @@ class ModelManager:
             })
 
         return {
-            "backend_status": "loaded" if len(self.loaded_models) > 0 else "idle",
-            "active_sessions": sum(m.active_sessions for m in self.loaded_models.values()),
-            "loaded_model": next(iter(self.loaded_models.keys())) if self.loaded_models else None,
-            "resident_models_count": len(self.loaded_models),
+            "backend_status": "loaded" if len(models_snapshot) > 0 else "idle",
+            "active_sessions": sum(m.active_sessions for m in models_snapshot),
+            "loaded_model": models_snapshot[0].tag if models_snapshot else None,
+            "resident_models_count": len(models_snapshot),
             "total_resident_mb": round(total_resident_mb, 1),
             "system_ram_total_mb": round(prof.total_ram_bytes / (1024 * 1024), 1),
             "system_ram_free_mb": round(prof.free_ram_bytes / (1024 * 1024), 1),

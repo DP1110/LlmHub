@@ -19,7 +19,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from urllib.parse import unquote
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,7 +47,7 @@ class ChatCompletionRequest(BaseModel):
     top_p: float = 0.9
     max_tokens: int = 512
     stream: bool = False
-    stop: Optional[List[str]] = None
+    stop: Optional[Union[str, List[str]]] = None
 
 class ServerState:
     def __init__(self) -> None:
@@ -200,6 +200,7 @@ def create_app() -> FastAPI:
         messages_dict = [{"role": m.role, "content": m.content or ""} for m in req.messages]
         prompt = loaded_model.template_engine.render(messages_dict, add_generation_prompt=True)
 
+        stop_criteria = [req.stop] if isinstance(req.stop, str) else req.stop
         session_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         loaded_model.active_sessions += 1
         loaded_model.last_active_time = time.monotonic()
@@ -210,7 +211,7 @@ def create_app() -> FastAPI:
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
                 top_p=req.top_p,
-                stop=req.stop
+                stop=stop_criteria
             )
         except Exception:
             loaded_model.active_sessions = max(0, loaded_model.active_sessions - 1)
