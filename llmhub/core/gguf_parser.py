@@ -80,6 +80,10 @@ class GGUFMetadata:
     @property
     def head_dim(self) -> int:
         """Dimension per attention head."""
+        arch = self.architecture
+        key_len = self.raw.get(f"{arch}.attention.key_length", self.raw.get("llama.attention.key_length"))
+        if key_len is not None:
+            return int(key_len)
         if self.head_count > 0:
             return self.embedding_length // self.head_count
         return 128
@@ -145,11 +149,13 @@ class GGUFParser:
         return GGUFMetadata(metadata, tensor_count=tensor_count, version=version)
 
     @classmethod
-    def _read_string(cls, stream) -> str:
+    def _read_string(cls, stream, max_str_len: int = 16 * 1024 * 1024) -> str:
         len_bytes = stream.read(8)
         if len(len_bytes) < 8:
             raise GGUFParseError("Unexpected EOF reading string length.")
         str_len = struct.unpack("<Q", len_bytes)[0]
+        if str_len > max_str_len:
+            raise GGUFParseError(f"Corrupt or excessive string length encountered: {str_len} bytes.")
         raw_str = stream.read(str_len)
         return raw_str.decode("utf-8", errors="replace")
 

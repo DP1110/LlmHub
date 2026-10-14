@@ -177,12 +177,23 @@ def cmd_rm(args: argparse.Namespace) -> None:
         sys.stderr.write(f"[ERROR] Model '{args.model}' not found in registry.\n")
         sys.exit(1)
 
-    model_dir = Path(record.file_path).parent
+    model_path = Path(record.file_path)
+    manifest_path = Path(record.manifest_path)
+    model_dir = model_path.parent
+
     try:
-        if model_dir.exists():
-            shutil.rmtree(model_dir)
+        models_root = config.models_dir.resolve()
+        resolved_dir = model_dir.resolve()
+        # Strictly ensure we only rmtree dedicated model subdirectories inside ~/.llmhub/models/
+        if resolved_dir.is_relative_to(models_root) and resolved_dir != models_root:
+            shutil.rmtree(resolved_dir)
+        else:
+            if model_path.exists():
+                model_path.unlink()
+            if manifest_path.exists():
+                manifest_path.unlink()
         registry.remove_model(record.tag)
-        print(f"Removed model '{record.tag}' and deleted files from {model_dir}")
+        print(f"Removed model '{record.tag}' and cleaned files from {model_dir}")
     except Exception as e:
         sys.stderr.write(f"[ERROR] Failed to delete {model_dir}: {e}\n")
         sys.exit(1)
@@ -204,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("model", help="Model name or spec (e.g. Qwen2.5-0.5B-Instruct-GGUF:q4_k_m)")
     p_run.add_argument("-p", "--prompt", default=None, help="One-shot prompt to execute")
     p_run.add_argument("-s", "--system", default="You are a helpful and concise offline AI assistant.", help="System prompt")
-    p_run.add_argument("-c", "--ctx-size", type=int, default=2048, help="Context size in tokens")
+    p_run.add_argument("-c", "--ctx-size", type=int, default=None, help="Context size in tokens (defaults to config.toml)")
     p_run.add_argument("-t", "--threads", type=int, default=None, help="Number of CPU worker threads")
     p_run.add_argument("-m", "--max-tokens", type=int, default=512, help="Maximum generated tokens")
     p_run.add_argument("--temperature", type=float, default=0.7, help="Sampling temperature")

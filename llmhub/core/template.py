@@ -67,7 +67,12 @@ class ChatTemplateEngine:
         )
         # Register custom Jinja functions commonly used by HuggingFace templates
         self.env.globals["raise_exception"] = _raise_exception
-        self.template = self.env.from_string(self.template_source)
+        try:
+            self.template = self.env.from_string(self.template_source)
+        except Exception:
+            # If model's embedded Jinja template has syntax errors, fall back to architectural default
+            self.template_source = self._select_template(None)
+            self.template = self.env.from_string(self.template_source)
 
     def _select_template(self, template_str: Optional[str]) -> str:
         if template_str and template_str.strip():

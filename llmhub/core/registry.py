@@ -73,6 +73,9 @@ class ModelRecord:
             "last_used_at": self.last_used_at,
         }
 
+from contextlib import contextmanager
+from typing import Any, Dict, Generator, List, Optional
+
 class ModelRegistry:
     """Thread-safe SQLite registry for model storage."""
 
@@ -81,12 +84,17 @@ class ModelRegistry:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self) -> Generator[sqlite3.Connection, None, None]:
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:

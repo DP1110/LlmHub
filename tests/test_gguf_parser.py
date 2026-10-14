@@ -20,7 +20,7 @@ def create_synthetic_gguf(path: Path) -> None:
         # Tensor count (8 bytes uint64)
         f.write(struct.pack("<Q", 145))
         # Metadata KV count (8 bytes uint64)
-        f.write(struct.pack("<Q", 6))
+        f.write(struct.pack("<Q", 7))
 
         def write_str(s: str):
             data = s.encode("utf-8")
@@ -52,7 +52,12 @@ def create_synthetic_gguf(path: Path) -> None:
         f.write(struct.pack("<I", GGUF_TYPE_UINT32))
         f.write(struct.pack("<I", 4))
 
-        # KV 6: tokenizer.chat_template (STRING)
+        # KV 6: llama.attention.key_length (UINT32)
+        write_str("llama.attention.key_length")
+        f.write(struct.pack("<I", GGUF_TYPE_UINT32))
+        f.write(struct.pack("<I", 128))
+
+        # KV 7: tokenizer.chat_template (STRING)
         write_str("tokenizer.chat_template")
         f.write(struct.pack("<I", GGUF_TYPE_STRING))
         write_str("{{ messages[0]['content'] }}")
@@ -69,6 +74,7 @@ def test_parse_synthetic_gguf(tmp_path: Path):
     assert meta.block_count == 28
     assert meta.head_count == 16
     assert meta.head_count_kv == 4
+    assert meta.head_dim == 128
     assert meta.chat_template == "{{ messages[0]['content'] }}"
 
 def test_parse_invalid_magic(tmp_path: Path):

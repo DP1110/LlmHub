@@ -70,8 +70,18 @@ class ModelRunner:
     def close(self) -> None:
         """Explicitly free native model resources."""
         if self.llm is not None:
-            del self.llm
+            if hasattr(self.llm, "close"):
+                try:
+                    self.llm.close()
+                except Exception:
+                    pass
             self.llm = None
+
+    def __enter__(self) -> "ModelRunner":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
 
     def get_memory_info(self) -> Dict[str, Any]:
         """Compute memory profile and theoretical decode speed."""
@@ -112,6 +122,7 @@ class ModelRunner:
 
         start_time = time.perf_counter()
         first_token_time: Optional[float] = None
+        ttft_ms: float = 0.0
         token_count = 0
 
         # Generate stream from llama-cpp-python
@@ -129,15 +140,16 @@ class ModelRunner:
             if first_token_time is None:
                 first_token_time = now
                 ttft_ms = (first_token_time - start_time) * 1000.0
-            else:
-                ttft_ms = (first_token_time - start_time) * 1000.0
 
             text_delta = chunk["choices"][0]["text"]
             token_count += 1
             
             # Decode time excludes TTFT prefill latency
-            decode_duration = (now - first_token_time) if first_token_time else 0.001
-            decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+            decode_duration = (now - first_token_time) if first_token_time else 0.0
+            if token_count > 1 and decode_duration > 0.001:
+                decode_tok_s = (token_count - 1) / decode_duration
+            else:
+                decode_tok_s = 0.0
 
             yield {
                 "token": text_delta,
@@ -150,12 +162,17 @@ class ModelRunner:
 
         total_time = time.perf_counter() - start_time
         final_decode_time = (total_time - (ttft_ms / 1000.0)) if first_token_time else total_time
-        final_tok_s = (token_count / final_decode_time) if final_decode_time > 0 else 0.0
+        if token_count > 1 and final_decode_time > 0.001:
+            final_tok_s = (token_count - 1) / final_decode_time
+        elif token_count == 1 and total_time > 0:
+            final_tok_s = 1.0 / total_time
+        else:
+            final_tok_s = 0.0
 
         yield {
             "token": "",
             "token_count": token_count,
-            "ttft_ms": ttft_ms if first_token_time else 0.0,
+            "ttft_ms": ttft_ms,
             "decode_tok_s": final_tok_s,
             "total_elapsed_s": total_time,
             "done": True

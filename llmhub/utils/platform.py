@@ -106,14 +106,23 @@ def get_hardware_profile() -> HardwareProfile:
     physical_cores = psutil.cpu_count(logical=False) or 1
     logical_cores = psutil.cpu_count(logical=True) or physical_cores
     
-    # Golden rule: For CPU LLM inference, use physical cores, NOT logical cores (hyperthreads)
-    # Hyperthreading shares L1/L2 and vector units, causing memory bus contention and lower IPC
-    suggested_threads = max(1, physical_cores)
-    
     termux = is_termux_environment()
     root = is_root_user()
     simd = detect_simd_features()
     warnings = []
+
+    # Golden rule: For CPU LLM inference, use physical cores, NOT logical cores (hyperthreads)
+    # On Android ARM64 Big.LITTLE architectures, avoid spreading threads onto efficiency cores.
+    if termux or "arm" in platform.machine().lower() or "aarch64" in platform.machine().lower():
+        # Typically 4 performance cores on octa-core SoCs
+        suggested_threads = min(4, max(1, physical_cores // 2 if physical_cores > 4 else physical_cores))
+        if termux:
+            warnings.append(
+                f"ARM Big.LITTLE detected: auto-selected {suggested_threads} threads "
+                f"(matching performance cluster to prevent efficiency core bottleneck)."
+            )
+    else:
+        suggested_threads = max(1, physical_cores)
     
     if termux:
         warnings.append("Running on Android Termux (ARM64).")

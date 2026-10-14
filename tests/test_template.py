@@ -26,3 +26,12 @@ def test_custom_template():
     messages = [{"role": "user", "content": "Explain CPU caching."}]
     rendered = engine.render(messages)
     assert rendered.strip() == "[INST] Explain CPU caching. [/INST]"
+
+def test_corrupt_template_fallback():
+    # Corrupt template with unbalanced Jinja tags
+    corrupt = "{% for msg in messages {{ invalid syntax"
+    engine = ChatTemplateEngine(template_str=corrupt, architecture="qwen")
+    messages = [{"role": "user", "content": "Hello"}]
+    rendered = engine.render(messages)
+    # Should fall back safely to ChatML
+    assert "<|im_start|>user\nHello<|im_end|>" in rendered
