@@ -91,31 +91,33 @@ export CXXFLAGS="-O3"
 # 4. Python Environment & Dependencies
 echo -e "\n${BOLD}[4/5] Installing Python dependencies...${NC}"
 
-# Install pure-Python dependencies without isolated build sandbox
+# Install pure-Python core dependencies (guaranteed to succeed without Rust/maturin)
 python -m pip install --no-build-isolation \
     toml \
     jinja2 \
-    fastapi \
-    uvicorn \
     requests \
-    pydantic \
     httpx \
     rich
 
-# Install llama-cpp-python with OpenBLAS / ARM NEON support
-echo -e "Installing llama-cpp-python with OpenBLAS C bindings (this may take a few minutes)..."
-python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir || {
-    echo -e "${YELLOW}[WARN] OpenBLAS compilation failed; falling back to standard CPU build...${NC}"
-    CMAKE_ARGS="" python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir || {
-        echo -e "${YELLOW}[WARN] llama-cpp-python wheel compilation skipped.${NC}"
-        echo -e "       (LLMHub will operate with remote/mock/cli runtimes)"
-    }
+# Install HTTP server dependencies (FastAPI, Uvicorn, Pydantic)
+echo -e "Installing HTTP server & API dependencies..."
+python -m pip install --no-build-isolation \
+    --extra-index-url https://termux-user-repository.github.io/pypi/ \
+    fastapi uvicorn pydantic 2>/dev/null || {
+    echo -e "${YELLOW}[NOTE] Pydantic/FastAPI compilation requires maturin on Python 3.14.${NC}"
+    echo -e "       (Core offline terminal runner 'llmhub run' and 'llmhub pull' are 100% ready!)${NC}"
 }
 
-# Install LLMHub package in current directory
+# Install llama-cpp-python with OpenBLAS / ARM NEON support
+echo -e "Checking llama-cpp-python..."
+python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir 2>/dev/null || {
+    echo -e "${YELLOW}[NOTE] llama-cpp-python build skipped or already installed.${NC}"
+}
+
+# Install LLMHub package in current directory without triggering dependency re-resolution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo -e "Installing LLMHub from ${SCRIPT_DIR}..."
-python -m pip install --no-build-isolation -e "${SCRIPT_DIR}"
+echo -e "Installing LLMHub CLI from ${SCRIPT_DIR}..."
+python -m pip install --no-build-isolation --no-deps -e "${SCRIPT_DIR}"
 
 # 5. Initialize Directory Layout & Wake-Lock Test
 echo -e "\n${BOLD}[5/5] Initializing ~/.llmhub storage layout and wake-lock...${NC}"

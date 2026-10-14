@@ -297,6 +297,15 @@ def cmd_run(args: argparse.Namespace) -> None:
         _run_standalone(config, args)
 
 def cmd_serve(args: argparse.Namespace) -> None:
+    try:
+        import fastapi
+        import pydantic
+    except ImportError:
+        sys.stderr.write("[ERROR] The HTTP server daemon requires 'fastapi' and 'pydantic'.\n")
+        sys.stderr.write("        On Android Termux, you can chat directly offline with:\n")
+        sys.stderr.write("          llmhub run <model_name>\n")
+        sys.exit(1)
+
     config = LLMHubConfig()
     if getattr(args, "low_mem", False):
         config.set_low_memory_mode(True)
