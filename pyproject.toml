@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llmhub"
+version = "0.1.0"
+description = "Offline-first, Ollama-like concurrent GGUF inference platform"
+readme = "README.md"
+authors = [{ name = "Principal Systems Engineer" }]
+requires-python = ">=3.11"
+dependencies = [
+    "llama-cpp-python>=0.3.0",
+    "httpx>=0.27.0",
+    "jinja2>=3.1.0",
+    "psutil>=5.9.0",
+    "toml>=0.10.2",
+    "rich>=13.0.0"
+]
+
+[project.scripts]
+llmhub = "llmhub.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0"
+]

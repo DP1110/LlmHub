@@ -1,0 +1,104 @@
+{
+  "project": "LLMHub",
+  "version": "0.1.0",
+  "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
+  "branchName": "phase-1-single-runner",
+  "overview": {
+    "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
+    "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
+    "storage_root": "~/.llmhub",
+    "architecture_target": "Zero-cloud, memory-bandwidth bounded CPU inference with token-level multi-model multi-session concurrency"
+  },
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Model Storage and Directory Layout Management",
+      "phase": 1,
+      "description": "Manage ~/.llmhub layout including config.toml, registry.db, models/<org>/<name>/<quant>/, logs/, and run/ across Windows, Linux, macOS, and Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Config directory ~/.llmhub created automatically on launch",
+        "Config file config.toml loaded with cross-platform default values",
+        "SQLite registry initialized with proper schemas",
+        "Termux environment paths and permissions correctly handled without requiring root"
+      ]
+    },
+    {
+      "id": "US-002",
+      "title": "Hugging Face Model Downloader with Resume & Incremental SHA256",
+      "phase": 1,
+      "description": "Download GGUF models from Hugging Face repositories with HTTP Range-based resume, progress bar, and streaming SHA-256 validation.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "HTTP Range header resumption for interrupted downloads",
+        "Streaming SHA-256 calculation without second pass over multi-GB disk files",
+        "Atomic rename from .tmp to model.gguf upon verification",
+        "Storage in ~/.llmhub/models/<org>/<name>/<quant>/model.gguf with manifest.json"
+      ]
+    },
+    {
+      "id": "US-003",
+      "title": "Standalone GGUF Header Parser & Metadata Extractor",
+      "phase": 1,
+      "description": "Parse binary GGUF files directly without initializing full llama.cpp engine to read tensor counts, architecture, context length, KV heads, and chat templates.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Direct binary parser for GGUF v2/v3 header and key-value metadata",
+        "Extract general.architecture, context_length, embedding_length, block_count, head_count, head_count_kv",
+        "Extract tokenizer.chat_template and tokenizer.ggml.tokens without loading weights into RAM",
+        "Sub-millisecond metadata read time on models of any size"
+      ]
+    },
+    {
+      "id": "US-004",
+      "title": "Jinja2 Chat Template Formatter & Generation Prompter",
+      "phase": 1,
+      "description": "Format multi-turn conversation messages (system, user, assistant) into token-ready text prompts using extracted GGUF Jinja2 templates.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Jinja2 environment configured with standard filters and variables (messages, bos_token, eos_token, add_generation_prompt)",
+        "Graceful fallback to ChatML or standard template if GGUF lacks tokenizer.chat_template",
+        "Correct handling of multi-turn history and system prompts"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "Single-Model Execution Engine & Streaming Output",
+      "phase": 1,
+      "description": "Load GGUF model via llama_cpp with mmap, execute autoregressive decode, and stream tokens to stdout with real-time stats.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Stream tokens character-by-character / token-by-token to stdout with zero latency buffer",
+        "Calculate and display TTFT (Time To First Token), generation speed (tok/s), and memory consumption",
+        "Support interactive REPL and single prompt one-shot execution",
+        "Clean memory deallocation on exit"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "Unified CLI (pull, run, list, show, rm)",
+      "phase": 1,
+      "description": "Provide a complete command-line interface mimicking Ollama commands for local GGUF management.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "llmhub pull <spec> downloads and registers model",
+        "llmhub run <spec> executes model in chat REPL or one-shot prompt",
+        "llmhub list displays local models with size, quant, and parameter count",
+        "llmhub show <spec> displays detailed architecture metadata and memory estimation",
+        "llmhub rm <spec> deletes model file and cleans registry entry"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "Memory & Bandwidth Bound Physics Calculator",
+      "phase": 1,
+      "description": "Mathematically compute exact weights size, KV cache memory footprint across context lengths, and theoretical memory-bandwidth bound generation ceilings.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Accurate KV cache byte formulas: 2 * n_layers * n_kv_heads * head_dim * ctx * element_size",
+        "DDR memory bandwidth bound calculation: max_tok_s = MemBandwidth / WeightsSize",
+        "Output explanation of memory-bandwidth bound decode vs compute-bound prefill"
+      ]
+    }
+  ]
+}
