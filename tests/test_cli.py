@@ -30,9 +30,13 @@ def test_cli_parser_defaults():
     assert args.model == "qwen"
 
     args = parser.parse_args(["serve", "--host", "0.0.0.0", "--port", "8000"])
-    assert args.subcommand == "serve"
+    assert args.subcommand in ("serve", "server")
     assert args.host == "0.0.0.0"
     assert args.port == 8000
+
+    args_server = parser.parse_args(["server", "--low-mem"])
+    assert args_server.subcommand in ("serve", "server")
+    assert args_server.low_mem is True
 
     args = parser.parse_args(["ps"])
     assert args.subcommand == "ps"

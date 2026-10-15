@@ -824,7 +824,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.set_defaults(func=cmd_run)
 
     # serve
-    p_serve = subparsers.add_parser("serve", help="Start the LLMHub HTTP API server daemon")
+    p_serve = subparsers.add_parser("serve", aliases=["server"], help="Start the LLMHub HTTP API server daemon")
     p_serve.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=None, help="Bind port (default: 11434)")
     p_serve.add_argument("--low-mem", action="store_true", help="Start server in low-memory mode")
