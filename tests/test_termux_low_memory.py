@@ -775,5 +775,69 @@ def test_runner_cli_chat_template_stop_token_not_triggered_by_prompt_echo(tmp_pa
             assert chunks[-1]["done"] is True
 
 
+def test_runner_cli_model_response_overlapping_prompt_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure response words overlapping with prompt prefix are never truncated (CRIT-1 fix)."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_overlap.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = "Please explain quantum computing in simple terms"
+    # Response begins with "Please find", overlapping first 7 characters with prompt
+    stream_output = "Please find below an explanation of quantum computing in simple terms."
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "Please find below an explanation of quantum computing in simple terms." in full_text
+
+
+def test_runner_cli_mid_generation_sigkill_surfaces_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure mid-stream SIGKILL (-9) is not swallowed as normal completion (CRIT-2 fix)."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_sigkill.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Some valid words generated before being killed")
+            mock_proc.stderr = io.StringIO("Out of memory: Kill process 12345\n")
+            mock_proc.poll.return_value = -9
+            mock_proc.returncode = -9
+            mock_popen.return_value = mock_proc
+
+            with pytest.raises(RuntimeError, match="Android Low Memory Killer OOM"):
+                list(runner.stream_completion(prompt="Generate a long essay"))
+
+
+
 
 

@@ -77,14 +77,18 @@ class LlamaCppBackend(Backend):
             if not cand and sys.platform != "win32":
                 cand = shutil.which("main")
             if not cand:
-                # Check standard build and package locations in Termux / Linux
+                bin_name = "llama-cli.exe" if sys.platform == "win32" else "llama-cli"
+                main_name = "main.exe" if sys.platform == "win32" else "main"
                 for p in [
-                    Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli",
-                    Path.home() / "llama.cpp" / "build" / "bin" / "main",
+                    Path.home() / "llama.cpp" / "build" / "bin" / bin_name,
+                    Path.home() / "llama.cpp" / "build" / "bin" / "Release" / bin_name,
+                    Path.home() / "llama.cpp" / "build" / "bin" / main_name,
+                    Path("/opt/homebrew/bin/llama-cli"),
+                    Path("/usr/local/bin/llama-cli"),
                     Path("/data/data/com.termux/files/usr/bin/llama-cli"),
                     Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
                 ]:
-                    if p.is_file() and os.access(p, os.X_OK):
+                    if p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK)):
                         cand = str(p)
                         break
             self._cli_binary = cand
@@ -123,13 +127,25 @@ class LlamaCppBackend(Backend):
         """Spawn a streaming generator wrapping native llama-cli subprocess."""
         import subprocess
         import threading
+        import uuid
         from llmhub.core.runner import get_cli_supported_flags, ends_with_stop_prefix
 
         flags = get_cli_supported_flags(self._cli_binary)
+
+        prompt_file: Optional[Path] = None
+        if len(prompt) > 4096:
+            temp_dir = Path.home() / ".llmhub" / "run"
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            prompt_file = temp_dir / f"prompt_{uuid.uuid4().hex[:8]}.txt"
+            prompt_file.write_text(prompt, encoding="utf-8")
+            prompt_args = ["-f", str(prompt_file)]
+        else:
+            prompt_args = ["-p", prompt]
+
         cmd = [
             self._cli_binary,
             "-m", str(self.model_path),
-            "-p", prompt,
+        ] + prompt_args + [
             "-n", str(max_tokens),
             "--temp", str(temperature),
             "--top-p", str(top_p),
@@ -213,19 +229,12 @@ class LlamaCppBackend(Backend):
                             buffer = remainder.lstrip("\r\n ")
                             accumulated_output = buffer
                             initial_buffer = ""
-                        elif len(cand) <= 3:
+                        else:
+                            # Diverged from prompt prefix: output is generated text, not prompt echo
                             prompt_stripped = True
                             buffer = initial_buffer
                             accumulated_output = initial_buffer
                             initial_buffer = ""
-                        elif len(cand) >= len(clean_prompt):
-                            prompt_stripped = True
-                            remainder = cand[len(clean_prompt):]
-                            buffer = remainder.lstrip("\r\n ")
-                            accumulated_output = buffer
-                            initial_buffer = ""
-                        else:
-                            continue
                     else:
                         buffer += char
                         accumulated_output += char
@@ -234,13 +243,12 @@ class LlamaCppBackend(Backend):
                     if prompt_stripped and stop:
                         for s in stop:
                             if s in accumulated_output:
-                                if s in buffer:
-                                    buffer = buffer.split(s)[0]
+                                stop_idx = accumulated_output.rfind(s)
+                                chars_already_yielded = len(accumulated_output) - len(buffer)
+                                if stop_idx >= chars_already_yielded:
+                                    buffer = buffer[:(stop_idx - chars_already_yielded)]
                                 else:
-                                    for i in range(len(s), 0, -1):
-                                        if buffer.endswith(s[:i]):
-                                            buffer = buffer[:-i]
-                                            break
+                                    buffer = ""
                                 hit_stop = True
                                 break
                     if hit_stop:
@@ -263,12 +271,6 @@ class LlamaCppBackend(Backend):
                     tokens_yielded += 1
                     yield {"choices": [{"text": buffer}]}
             finally:
-                for stream in (proc.stdout, proc.stderr):
-                    if stream:
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
                 if proc.poll() is None:
                     proc.terminate()
                     try:
@@ -282,15 +284,29 @@ class LlamaCppBackend(Backend):
                     except Exception:
                         pass
                 t.join(timeout=0.5)
+                for stream in (proc.stdout, proc.stderr):
+                    if stream:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                if prompt_file and prompt_file.is_file():
+                    try:
+                        prompt_file.unlink()
+                    except Exception:
+                        pass
 
-            # Check if process crashed with non-zero exit code and 0 tokens yielded (CRIT-1)
-            if proc.returncode is not None and proc.returncode != 0 and tokens_yielded == 0 and not hit_stop:
+            # Check if process crashed with non-zero exit code
+            rc = proc.returncode if isinstance(proc.returncode, int) else proc.poll()
+            if isinstance(rc, int) and rc != 0 and not hit_stop:
                 err_text = "".join(stderr_chunks).strip()
                 extra_hint = ""
-                if proc.returncode in (-9, 137, 9):
+                if rc in (-9, 137, 9):
                     extra_hint = " (Process terminated by SIGKILL, likely Android Low Memory Killer OOM)"
                 raise RuntimeError(
-                    f"Native llama-cli failed (exit code {proc.returncode}{extra_hint}): {err_text or 'No stderr'}"
+                    f"Native llama-cli failed (exit code {rc}{extra_hint}).\n"
+                    f"Tokens yielded before crash: {tokens_yielded}\n"
+                    f"Details:\n{err_text or 'No stderr'}"
                 )
 
         return _gen(), proc

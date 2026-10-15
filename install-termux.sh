@@ -93,8 +93,22 @@ export CXXFLAGS="-O3"
 # 4. Python Environment & Dependencies
 echo -e "\n${BOLD}[4/5] Installing Python dependencies...${NC}"
 
+# Detect PEP 668 externally-managed environment flag
+PIP_EXTRA_FLAGS=""
+if python -m pip install --help 2>&1 | grep -q -- '--break-system-packages'; then
+    PIP_EXTRA_FLAGS="--break-system-packages"
+fi
+
+# Resolve target binary directory
+if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
+    TERMUX_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin"
+else
+    TERMUX_BIN="${PREFIX:-$HOME/.local}/bin"
+fi
+mkdir -p "$TERMUX_BIN"
+
 # Install pure-Python core dependencies (guaranteed to succeed without Rust/maturin)
-python -m pip install --no-build-isolation \
+python -m pip install --no-build-isolation $PIP_EXTRA_FLAGS \
     toml \
     jinja2 \
     requests \
@@ -103,7 +117,7 @@ python -m pip install --no-build-isolation \
 
 # Install HTTP server dependencies (FastAPI, Uvicorn, Pydantic)
 echo -e "Installing HTTP server & API dependencies..."
-python -m pip install --no-build-isolation \
+python -m pip install --no-build-isolation $PIP_EXTRA_FLAGS \
     --extra-index-url https://termux-user-repository.github.io/pypi/ \
     fastapi uvicorn pydantic 2>/dev/null || {
     echo -e "${YELLOW}[NOTE] Pydantic/FastAPI compilation requires maturin on Python 3.14.${NC}"
@@ -140,7 +154,7 @@ else
         git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$HOME/llama.cpp"
     else
         echo -e "Updating llama.cpp repository..."
-        (cd "$HOME/llama.cpp" && git pull --ff-only 2>/dev/null || true)
+        (cd "$HOME/llama.cpp" && (git pull --ff-only 2>/dev/null || git fetch --depth 1 2>/dev/null) || true)
     fi
     mkdir -p "$HOME/llama.cpp/build"
     echo -e "Compiling llama-cli with NEON / OpenBLAS acceleration..."
@@ -151,9 +165,8 @@ else
     cmake --build "$HOME/llama.cpp/build" --target llama-cli -j4 || cmake --build "$HOME/llama.cpp/build" --target llama-cli -j2
     if [ -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
         LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-cli"
-        TERMUX_USER_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin"
-        if [ -w "$TERMUX_USER_BIN" ]; then
-            ln -sf "$LLAMA_BIN" "$TERMUX_USER_BIN/llama-cli"
+        if [ -w "$TERMUX_BIN" ]; then
+            ln -sf "$LLAMA_BIN" "$TERMUX_BIN/llama-cli"
         fi
         echo -e "${GREEN}[+] Successfully built native llama-cli at ${LLAMA_BIN}${NC}"
     else
@@ -166,16 +179,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo -e "Installing LLMHub CLI from ${SCRIPT_DIR}..."
 
 # 1. Attempt standard pip install as non-editable fallback
-python -m pip install --no-build-isolation --no-deps "${SCRIPT_DIR}" > "$HOME/.llmhub/logs/pip-install.log" 2>&1 || true
+python -m pip install --no-build-isolation --no-deps $PIP_EXTRA_FLAGS "${SCRIPT_DIR}" > "$HOME/.llmhub/logs/pip-install.log" 2>&1 || true
 
 # 2. Deploy direct executable launcher script into bin directory
-if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
-    TERMUX_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin"
-else
-    TERMUX_BIN="${PREFIX:-$HOME/.local}/bin"
-fi
-mkdir -p "$TERMUX_BIN"
-
 cat << EOF > "$TERMUX_BIN/llmhub"
 #!/usr/bin/env python3
 import os
@@ -230,13 +236,17 @@ echo -e "${BOLD}================================================================
 
 echo -e "\nSystem Diagnostics:"
 if command -v llmhub >/dev/null 2>&1; then
-    llmhub hardware
+    llmhub hardware || true
     echo ""
-    llmhub termux
+    llmhub termux || true
+elif [ -x "$TERMUX_BIN/llmhub" ]; then
+    "$TERMUX_BIN/llmhub" hardware || true
+    echo ""
+    "$TERMUX_BIN/llmhub" termux || true
 else
-    python -m llmhub.cli hardware
+    python -m llmhub.cli hardware 2>/dev/null || true
     echo ""
-    python -m llmhub.cli termux
+    python -m llmhub.cli termux 2>/dev/null || true
 fi
 
 echo -e "\n${BOLD}Next steps to get started:${NC}"
