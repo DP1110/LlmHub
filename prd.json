@@ -854,6 +854,20 @@
         "decode_step smoothly yields token chunks into quantum round-robin scheduler",
         "Seamless SSE streaming and non-streaming HTTP completions via daemon without 500 errors"
       ]
+    },
+    {
+      "id": "US-067",
+      "title": "Robust Stop-Token Prefix Buffering and Native llama.cpp Build in install-termux.sh",
+      "phase": 11,
+      "description": "Prevent premature stop-token termination on multi-turn chat templates with <|im_end|>, buffer stop-sequence prefixes to eliminate token leakage, and replace failing pip build with native llama-cli detection and compilation in install-termux.sh.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Eliminated pip llama-cpp-python build attempts on Python 3.14 in install-termux.sh",
+        "Automatic detection and source compilation of native llama-cli binary with ARM NEON / OpenBLAS",
+        "Multi-turn chat template stop tokens inside prompt guarded from prematurely aborting inference",
+        "ends_with_stop_prefix prevents leaking <|im_end|> and </s> into yielded user text",
+        "100% test pass rate across 175 tests in test suite"
+      ]
     }
   ]
 }

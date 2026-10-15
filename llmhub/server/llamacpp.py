@@ -65,11 +65,28 @@ class LlamaCppBackend(Backend):
                 verbose=kwargs.get("verbose", False)
             )
         else:
+            import os
             import shutil
             import sys
-            cand = shutil.which("llama-cli") or shutil.which("llama")
+            cand = (
+                shutil.which("llama-cli")
+                or shutil.which("llama")
+                or shutil.which("llama-run")
+                or shutil.which("llama-completion")
+            )
             if not cand and sys.platform != "win32":
                 cand = shutil.which("main")
+            if not cand:
+                # Check standard build and package locations in Termux / Linux
+                for p in [
+                    Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli",
+                    Path.home() / "llama.cpp" / "build" / "bin" / "main",
+                    Path("/data/data/com.termux/files/usr/bin/llama-cli"),
+                    Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
+                ]:
+                    if p.is_file() and os.access(p, os.X_OK):
+                        cand = str(p)
+                        break
             self._cli_binary = cand
             if not self._cli_binary:
                 raise RuntimeError(
@@ -106,7 +123,7 @@ class LlamaCppBackend(Backend):
         """Spawn a streaming generator wrapping native llama-cli subprocess."""
         import subprocess
         import threading
-        from llmhub.core.runner import get_cli_supported_flags
+        from llmhub.core.runner import get_cli_supported_flags, ends_with_stop_prefix
 
         flags = get_cli_supported_flags(self._cli_binary)
         cmd = [
@@ -119,12 +136,15 @@ class LlamaCppBackend(Backend):
             "-t", str(self.n_threads),
             "-c", str(self.n_ctx),
         ]
+        if "-no-cnv" in flags:
+            cmd.append("-no-cnv")
+        elif "--no-conversation" in flags:
+            cmd.append("--no-conversation")
+
         if "-st" in flags:
             cmd.append("-st")
         elif "--single-turn" in flags:
             cmd.append("--single-turn")
-        else:
-            cmd.append("-st")
 
         no_display_prompt_active = False
         if "--no-display-prompt" in flags:
@@ -132,6 +152,8 @@ class LlamaCppBackend(Backend):
             no_display_prompt_active = True
         if "--log-disable" in flags:
             cmd.append("--log-disable")
+        if "--special" in flags:
+            cmd.append("--special")
 
         has_reverse_prompt = ("-r" in flags) or ("--reverse-prompt" in flags)
         if has_reverse_prompt and stop:
@@ -164,7 +186,8 @@ class LlamaCppBackend(Backend):
         def _gen():
             buffer = ""
             initial_buffer = ""
-            prompt_stripped = not bool(prompt)
+            prompt_stripped = not bool(prompt) or no_display_prompt_active
+            clean_prompt = prompt.strip() if prompt else ""
             tokens_yielded = 0
             accumulated_output = ""
             hit_stop = False
@@ -177,35 +200,58 @@ class LlamaCppBackend(Backend):
                     # Detect and strip echoed prompt
                     if not prompt_stripped:
                         initial_buffer += char
-                        if len(initial_buffer) <= len(prompt):
-                            if initial_buffer == prompt[:len(initial_buffer)]:
-                                if len(initial_buffer) == len(prompt):
-                                    prompt_stripped = True
-                                continue
-                            else:
+                        cand = initial_buffer.lstrip("\r\n ")
+                        if clean_prompt and clean_prompt.startswith(cand):
+                            if cand == clean_prompt:
                                 prompt_stripped = True
-                                buffer = initial_buffer
                                 initial_buffer = ""
-                        else:
+                                accumulated_output = ""
+                            continue
+                        elif clean_prompt and clean_prompt in initial_buffer:
+                            prompt_stripped = True
+                            remainder = initial_buffer.split(clean_prompt, 1)[1]
+                            buffer = remainder.lstrip("\r\n ")
+                            accumulated_output = buffer
+                            initial_buffer = ""
+                        elif len(cand) <= 3:
                             prompt_stripped = True
                             buffer = initial_buffer
+                            accumulated_output = initial_buffer
                             initial_buffer = ""
+                        elif len(cand) >= len(clean_prompt):
+                            prompt_stripped = True
+                            remainder = cand[len(clean_prompt):]
+                            buffer = remainder.lstrip("\r\n ")
+                            accumulated_output = buffer
+                            initial_buffer = ""
+                        else:
+                            continue
                     else:
                         buffer += char
+                        accumulated_output += char
 
-                    accumulated_output += char
-                    if stop:
+                    # Check stop sequences only on assistant generated text
+                    if prompt_stripped and stop:
                         for s in stop:
                             if s in accumulated_output:
+                                if s in buffer:
+                                    buffer = buffer.split(s)[0]
+                                else:
+                                    for i in range(len(s), 0, -1):
+                                        if buffer.endswith(s[:i]):
+                                            buffer = buffer[:-i]
+                                            break
                                 hit_stop = True
                                 break
                     if hit_stop:
                         break
 
-                    if char in (" ", "\n", "\t") or len(buffer) >= 6:
-                        tokens_yielded += 1
-                        yield {"choices": [{"text": buffer}]}
-                        buffer = ""
+                    is_stop_prefix = prompt_stripped and stop and ends_with_stop_prefix(buffer, stop)
+                    if not is_stop_prefix:
+                        if char in (" ", "\n", "\t") or len(buffer) >= 6:
+                            tokens_yielded += 1
+                            yield {"choices": [{"text": buffer}]}
+                            buffer = ""
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
@@ -238,7 +284,7 @@ class LlamaCppBackend(Backend):
                 t.join(timeout=0.5)
 
             # Check if process crashed with non-zero exit code and 0 tokens yielded (CRIT-1)
-            if proc.returncode is not None and proc.returncode != 0 and tokens_yielded == 0:
+            if proc.returncode is not None and proc.returncode != 0 and tokens_yielded == 0 and not hit_stop:
                 err_text = "".join(stderr_chunks).strip()
                 extra_hint = ""
                 if proc.returncode in (-9, 137, 9):

@@ -735,4 +735,45 @@ def test_runner_cli_reverse_prompt_stop_sequence(tmp_path: Path, monkeypatch: py
             assert "-r" in called_cmd
 
 
+def test_runner_cli_chat_template_stop_token_not_triggered_by_prompt_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure stop tokens inside the echoed prompt (like <|im_end|>) do NOT abort generation."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_chat.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = "<|im_start|>system\nYou are an AI.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    stream_output = (
+        "\n<|im_start|>system\nYou are an AI.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+        "Hello there! How can I help you today?<|im_end|>Extra garbage"
+    )
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "<|im_start|>" not in full_text
+            assert "<|im_end|>" not in full_text
+            assert "Hello there! How can I help you today?" in full_text
+            assert "Extra garbage" not in full_text
+            assert chunks[-1]["done"] is True
+
+
+
 

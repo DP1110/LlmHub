@@ -47,23 +47,27 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
             timeout=3.0,
             check=False
         )
-        help_text = (res.stdout or "") + " " + (res.stderr or "")
-        for flag in [
-            "-st", "--single-turn",
-            "--no-display-prompt",
-            "--log-disable",
-            "--no-warmup",
-            "-fa", "--flash-attn",
-            "-r", "--reverse-prompt",
-        ]:
-            escaped_flag = re.escape(flag)
-            if re.search(rf"(?:^|\s){escaped_flag}(?:\s|,|$)", help_text):
-                supported.add(flag)
+        help_text = (res.stdout or "") + "\n" + (res.stderr or "")
+        supported = set(re.findall(r"(--?[\w-]+)", help_text))
     except Exception:
-        supported.update(["-st", "--single-turn", "--no-display-prompt"])
+        pass
+
+    # Universal default fallback if flags couldn't be discovered (e.g. mocked or timeout)
+    if not supported:
+        supported.add("-st")
 
     _CLI_FLAGS_CACHE[cli_binary] = supported
     return supported
+
+def ends_with_stop_prefix(text: str, stop_seqs: Optional[List[str]]) -> bool:
+    """Return True if text ends with a non-empty prefix of any stop sequence."""
+    if not text or not stop_seqs:
+        return False
+    for s in stop_seqs:
+        for i in range(1, len(s) + 1):
+            if text.endswith(s[:i]):
+                return True
+    return False
 
 class ModelRunner:
     """Manages loading, inference, and streaming for a single GGUF model."""
@@ -114,10 +118,27 @@ class ModelRunner:
                 verbose=self.verbose
             )
         else:
+            import os
             import shutil
-            cand = shutil.which("llama-cli") or shutil.which("llama")
+            cand = (
+                shutil.which("llama-cli")
+                or shutil.which("llama")
+                or shutil.which("llama-run")
+                or shutil.which("llama-completion")
+            )
             if not cand and sys.platform != "win32":
                 cand = shutil.which("main")
+            if not cand:
+                # Check standard build and package locations in Termux / Linux
+                for p in [
+                    Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli",
+                    Path.home() / "llama.cpp" / "build" / "bin" / "main",
+                    Path("/data/data/com.termux/files/usr/bin/llama-cli"),
+                    Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
+                ]:
+                    if p.is_file() and os.access(p, os.X_OK):
+                        cand = str(p)
+                        break
             self._cli_binary = cand
             if not self._cli_binary:
                 raise RuntimeError(
@@ -179,6 +200,9 @@ class ModelRunner:
         if not self.llm and not getattr(self, "_cli_binary", None):
             raise RuntimeError("Model is not loaded.")
 
+        if stop is None:
+            stop = ["<|im_end|>", "<|eot_id|>", "</s>", "\nUser:", "<|end_of_text|>"]
+
         if self.llm is None and getattr(self, "_cli_binary", None):
             import subprocess
             import threading
@@ -193,12 +217,15 @@ class ModelRunner:
                 "-t", str(self.n_threads),
                 "-c", str(self.n_ctx),
             ]
+            if "-no-cnv" in flags:
+                cmd.append("-no-cnv")
+            elif "--no-conversation" in flags:
+                cmd.append("--no-conversation")
+
             if "-st" in flags:
                 cmd.append("-st")
             elif "--single-turn" in flags:
                 cmd.append("--single-turn")
-            else:
-                cmd.append("-st")
 
             no_display_prompt_active = False
             if "--no-display-prompt" in flags:
@@ -206,6 +233,8 @@ class ModelRunner:
                 no_display_prompt_active = True
             if "--log-disable" in flags:
                 cmd.append("--log-disable")
+            if "--special" in flags:
+                cmd.append("--special")
 
             has_reverse_prompt = ("-r" in flags) or ("--reverse-prompt" in flags)
             if has_reverse_prompt and stop:
@@ -243,7 +272,8 @@ class ModelRunner:
                 # Fluid token/character-based chunk streaming with prompt echo filtering
                 buffer = ""
                 initial_buffer = ""
-                prompt_stripped = not bool(prompt)
+                prompt_stripped = not bool(prompt) or no_display_prompt_active
+                clean_prompt = prompt.strip() if prompt else ""
                 while not hit_stop:
                     char = proc.stdout.read(1)
                     if not char:
@@ -252,48 +282,71 @@ class ModelRunner:
                     # Detect and strip prompt if llama-cli echoed it
                     if not prompt_stripped:
                         initial_buffer += char
-                        if len(initial_buffer) <= len(prompt):
-                            if initial_buffer == prompt[:len(initial_buffer)]:
-                                if len(initial_buffer) == len(prompt):
-                                    prompt_stripped = True
-                                continue
-                            else:
+                        cand = initial_buffer.lstrip("\r\n ")
+                        if clean_prompt and clean_prompt.startswith(cand):
+                            if cand == clean_prompt:
                                 prompt_stripped = True
-                                buffer = initial_buffer
                                 initial_buffer = ""
-                        else:
+                                accumulated_output = ""
+                            continue
+                        elif clean_prompt and clean_prompt in initial_buffer:
+                            prompt_stripped = True
+                            remainder = initial_buffer.split(clean_prompt, 1)[1]
+                            buffer = remainder.lstrip("\r\n ")
+                            accumulated_output = buffer
+                            initial_buffer = ""
+                        elif len(cand) <= 3:
                             prompt_stripped = True
                             buffer = initial_buffer
+                            accumulated_output = initial_buffer
                             initial_buffer = ""
+                        elif len(cand) >= len(clean_prompt):
+                            prompt_stripped = True
+                            remainder = cand[len(clean_prompt):]
+                            buffer = remainder.lstrip("\r\n ")
+                            accumulated_output = buffer
+                            initial_buffer = ""
+                        else:
+                            continue
                     else:
                         buffer += char
+                        accumulated_output += char
 
-                    accumulated_output += char
-                    if stop:
+                    # Check stop sequences only on assistant generated text
+                    if prompt_stripped and stop:
                         for s in stop:
                             if s in accumulated_output:
+                                if s in buffer:
+                                    buffer = buffer.split(s)[0]
+                                else:
+                                    for i in range(len(s), 0, -1):
+                                        if buffer.endswith(s[:i]):
+                                            buffer = buffer[:-i]
+                                            break
                                 hit_stop = True
                                 break
                     if hit_stop:
                         break
 
-                    if char in (" ", "\n", "\t") or len(buffer) >= 8:
-                        token_count += 1
-                        now = time.perf_counter()
-                        if first_token_time is None:
-                            first_token_time = now
-                            ttft_ms = (first_token_time - start_time) * 1000.0
-                        decode_duration = (now - first_token_time) if first_token_time else 0.0
-                        decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
-                        yield {
-                            "token": buffer,
-                            "token_count": token_count,
-                            "ttft_ms": ttft_ms,
-                            "decode_tok_s": decode_tok_s,
-                            "total_elapsed_s": now - start_time,
-                            "done": False
-                        }
-                        buffer = ""
+                    is_stop_prefix = prompt_stripped and stop and ends_with_stop_prefix(buffer, stop)
+                    if not is_stop_prefix:
+                        if char in (" ", "\n", "\t") or len(buffer) >= 8:
+                            token_count += 1
+                            now = time.perf_counter()
+                            if first_token_time is None:
+                                first_token_time = now
+                                ttft_ms = (first_token_time - start_time) * 1000.0
+                            decode_duration = (now - first_token_time) if first_token_time else 0.0
+                            decode_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+                            yield {
+                                "token": buffer,
+                                "token_count": token_count,
+                                "ttft_ms": ttft_ms,
+                                "decode_tok_s": decode_tok_s,
+                                "total_elapsed_s": now - start_time,
+                                "done": False
+                            }
+                            buffer = ""
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
@@ -343,7 +396,7 @@ class ModelRunner:
             decode_duration = (total_elapsed - (ttft_ms / 1000.0)) if first_token_time else total_elapsed
             final_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
 
-            if proc.returncode is not None and proc.returncode != 0 and token_count == 0:
+            if proc.returncode is not None and proc.returncode != 0 and token_count == 0 and not hit_stop:
                 err_text = "".join(stderr_chunks).strip()
                 extra_hint = ""
                 if proc.returncode in (-9, 137, 9):

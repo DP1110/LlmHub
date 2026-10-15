@@ -114,11 +114,52 @@ mkdir -p "$HOME/.llmhub/logs"
 mkdir -p "$HOME/.llmhub/models"
 mkdir -p "$HOME/.llmhub/run"
 
-# Install llama-cpp-python with OpenBLAS / ARM NEON support
-echo -e "Checking llama-cpp-python..."
-python -m pip install llama-cpp-python --no-build-isolation --no-cache-dir > "$HOME/.llmhub/logs/build-llama.log" 2>&1 || {
-    echo -e "${YELLOW}[NOTE] llama-cpp-python build skipped or already installed (logs in ~/.llmhub/logs/build-llama.log).${NC}"
-}
+# Verify or compile native llama.cpp ARM64 runtime
+echo -e "\n${BOLD}[4.5/5] Checking native llama.cpp ARM64 binary...${NC}"
+LLAMA_BIN=""
+for cand in "llama-cli" "llama" "llama-run" "llama-completion"; do
+    if command -v "$cand" >/dev/null 2>&1; then
+        LLAMA_BIN="$(command -v "$cand")"
+        break
+    elif [ -f "${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand" ]; then
+        LLAMA_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand"
+        break
+    elif [ -f "$HOME/llama.cpp/build/bin/$cand" ]; then
+        LLAMA_BIN="$HOME/llama.cpp/build/bin/$cand"
+        break
+    fi
+done
+
+if [ -n "$LLAMA_BIN" ]; then
+    echo -e "${GREEN}[+] Detected native llama.cpp binary: ${LLAMA_BIN}${NC}"
+else
+    echo -e "${YELLOW}[!] llama-cli not found in system packages. Building latest llama.cpp natively...${NC}"
+    mkdir -p "$HOME"
+    if [ ! -d "$HOME/llama.cpp" ]; then
+        echo -e "Cloning latest llama.cpp..."
+        git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$HOME/llama.cpp"
+    else
+        echo -e "Updating llama.cpp repository..."
+        (cd "$HOME/llama.cpp" && git pull --ff-only 2>/dev/null || true)
+    fi
+    mkdir -p "$HOME/llama.cpp/build"
+    echo -e "Compiling llama-cli with NEON / OpenBLAS acceleration..."
+    cmake -B "$HOME/llama.cpp/build" -S "$HOME/llama.cpp" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_OPENBLAS=on \
+        -DGGML_NEON=on
+    cmake --build "$HOME/llama.cpp/build" --target llama-cli -j4 || cmake --build "$HOME/llama.cpp/build" --target llama-cli -j2
+    if [ -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
+        LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-cli"
+        TERMUX_USER_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin"
+        if [ -w "$TERMUX_USER_BIN" ]; then
+            ln -sf "$LLAMA_BIN" "$TERMUX_USER_BIN/llama-cli"
+        fi
+        echo -e "${GREEN}[+] Successfully built native llama-cli at ${LLAMA_BIN}${NC}"
+    else
+        echo -e "${RED}[ERROR] Could not build llama-cli. Please install via: pkg install llama-cpp${NC}"
+    fi
+fi
 
 # Install LLMHub CLI launcher directly into PATH (bypasses setuptools/pip build isolation on Python 3.14)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
