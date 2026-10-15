@@ -48,3 +48,49 @@ def test_registry_lifecycle(tmp_path: Path):
     removed = reg.remove_model("Qwen2.5-0.5B:q4_k_m")
     assert removed is not None
     assert len(reg.list_models()) == 0
+
+
+def test_registry_case_insensitive_matching(tmp_path: Path):
+    db_file = tmp_path / "registry.db"
+    reg = ModelRegistry(db_file)
+    rec = reg.register_model(
+        org="Qwen",
+        name="Qwen2.5-0.5B-Instruct",
+        quant="q4_k_m",
+        file_path=tmp_path / "model.gguf",
+        manifest_path=tmp_path / "manifest.json",
+        size_bytes=390000000,
+        sha256="",
+        architecture="qwen2",
+        n_layers=24,
+        n_kv_heads=2,
+        head_dim=64,
+        ctx_max=32768
+    )
+
+    # Test lowercase and hyphen variations
+    assert reg.find_model("qwen/qwen2.5-0.5b-instruct:q4_k_m") is not None
+    assert reg.find_model("qwen2.5-0.5b-instruct:q4_k_m") is not None
+    assert reg.find_model("qwen2.5-0.5b-instruct-q4_k_m") is not None
+
+
+def test_scan_and_register_local_models(tmp_path: Path):
+    from tests.test_gguf_parser import create_synthetic_gguf
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(parents=True)
+    gguf_path = models_dir / "test-model-q4_k_m.gguf"
+    create_synthetic_gguf(gguf_path)
+
+    db_file = tmp_path / "registry.db"
+    reg = ModelRegistry(db_file)
+
+    assert len(reg.list_models()) == 0
+    scanned = reg.scan_and_register_local_models(models_dir)
+    assert len(scanned) == 1
+    assert scanned[0].file_path == str(gguf_path.resolve())
+
+    # Idempotent re-scan
+    scanned_again = reg.scan_and_register_local_models(models_dir)
+    assert len(scanned_again) == 0
+    assert len(reg.list_models()) == 1

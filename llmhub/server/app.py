@@ -439,6 +439,11 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/models")
     async def list_v1_models() -> Dict[str, Any]:
+        try:
+            await asyncio.to_thread(state.registry.scan_and_register_local_models, state.config.models_dir)
+        except Exception as e:
+            logger.debug("Local models auto-scan exception in /v1/models: %s", e)
+
         records = state.registry.list_models()
         data = [
             {
@@ -452,6 +457,22 @@ def create_app() -> FastAPI:
             }
             for r in records
         ]
+
+        # Merge any resident models in RAM not in the registry list
+        existing_tags = {r.tag for r in records}
+        for tag, lm in state.model_manager.loaded_models.items():
+            if tag not in existing_tags:
+                data.append({
+                    "id": tag,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "resident",
+                    "permission": [],
+                    "root": tag,
+                    "parent": None,
+                })
+                existing_tags.add(tag)
+
         return {"object": "list", "data": data}
 
     @app.get("/v1/models/{model_id:path}")
@@ -459,6 +480,18 @@ def create_app() -> FastAPI:
         clean_id = unquote(model_id)
         record = state.registry.find_model(clean_id) or state.registry.find_model(model_id)
         if not record:
+            # Check if resident in RAM
+            lm = state.model_manager.get_model(clean_id) or state.model_manager.get_model(model_id)
+            if lm:
+                return {
+                    "id": lm.tag,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": "resident",
+                    "permission": [],
+                    "root": lm.tag,
+                    "parent": None,
+                }
             raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found.")
         return {
             "id": record.tag,
@@ -472,12 +505,45 @@ def create_app() -> FastAPI:
 
     @app.get("/api/models")
     async def list_api_models() -> Dict[str, Any]:
+        try:
+            await asyncio.to_thread(state.registry.scan_and_register_local_models, state.config.models_dir)
+        except Exception as e:
+            logger.debug("Local models auto-scan exception in /api/models: %s", e)
+
         records = state.registry.list_models()
-        return {"models": [r.to_dict() for r in records]}
+        models = [r.to_dict() for r in records]
+
+        # Annotate resident status for registered models
+        resident_tags = set(state.model_manager.loaded_models.keys())
+        for m in models:
+            m["is_resident"] = m.get("tag") in resident_tags
+
+        # Merge any currently resident loaded models not already in registry
+        existing_tags = {m.get("tag") for m in models}
+        for tag, lm in state.model_manager.loaded_models.items():
+            if tag not in existing_tags:
+                models.append({
+                    "id": 0,
+                    "tag": tag,
+                    "org": "resident",
+                    "name": tag,
+                    "quant": getattr(lm.metadata, "quant_type", "GGUF") if lm.metadata else "GGUF",
+                    "file_path": str(lm.file_path) if lm.file_path else "",
+                    "size_bytes": getattr(lm, "weights_bytes", 0),
+                    "architecture": getattr(lm.metadata, "architecture", "llama") if lm.metadata else "llama",
+                    "n_layers": getattr(lm.metadata, "block_count", 0) if lm.metadata else 0,
+                    "ctx_max": getattr(lm, "n_ctx", 2048),
+                    "is_resident": True,
+                })
+                existing_tags.add(tag)
+
+        return {"models": models}
 
     @app.get("/api/ps")
     async def get_ps() -> Dict[str, Any]:
         info = state.model_manager.get_ps_info()
+        if "resident_models" not in info:
+            info["resident_models"] = {m["tag"]: m for m in info.get("models", []) if "tag" in m}
         info["scheduler"] = state.scheduler.get_telemetry()
         batch_summary = {}
         for tag, lm in state.model_manager.loaded_models.items():
@@ -890,7 +956,15 @@ def create_app() -> FastAPI:
                     if not sched_session.is_done:
                         await state.scheduler.cancel_session(session_id)
 
-            return StreamingResponse(event_generator(), media_type="text/event-stream")
+            return StreamingResponse(
+                event_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
 
         else:
             # Non-streaming JSON response

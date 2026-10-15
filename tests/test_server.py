@@ -367,3 +367,48 @@ def test_chat_completions_auto_loads_model_on_termux(mock_registry, client, tmp_
         state.model_manager.backend_factory = old_factory
 
 
+def test_chat_completions_sse_streaming_headers(client):
+    lm = setup_mock_model("mock-streaming")
+    try:
+        payload = {
+            "model": "mock-streaming",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True
+        }
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        assert resp.headers.get("cache-control") == "no-cache, no-transform"
+        assert resp.headers.get("x-accel-buffering") == "no"
+    finally:
+        state.model_manager.loaded_models.pop("mock-streaming", None)
+
+
+def test_api_models_includes_resident_and_scanned(client):
+    lm = setup_mock_model("mock-resident-only")
+    try:
+        resp = client.get("/api/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        tags = [m["tag"] for m in data.get("models", [])]
+        assert "mock-resident-only" in tags
+        resident_flags = {m["tag"]: m.get("is_resident") for m in data.get("models", [])}
+        assert resident_flags["mock-resident-only"] is True
+
+        # Also verify in /v1/models
+        v1_resp = client.get("/v1/models")
+        assert v1_resp.status_code == 200
+        v1_ids = [m["id"] for m in v1_resp.json().get("data", [])]
+        assert "mock-resident-only" in v1_ids
+
+        # Also verify in /api/ps
+        ps_resp = client.get("/api/ps")
+        assert ps_resp.status_code == 200
+        ps_data = ps_resp.json()
+        assert "resident_models" in ps_data
+        assert "mock-resident-only" in ps_data["resident_models"]
+    finally:
+        state.model_manager.loaded_models.pop("mock-resident-only", None)
+
+
+

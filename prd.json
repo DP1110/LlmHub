@@ -882,6 +882,22 @@
         "POST /v1/chat/completions succeeds end-to-end on Termux web UI and API without HTTP 500 errors",
         "100% test pass rate across all 181 tests in test suite"
       ]
+    },
+    {
+      "id": "US-069",
+      "title": "Mobile Web UI Chat and Local Model Auto-Discovery Hardening",
+      "phase": 11,
+      "description": "Fix Web UI failing to issue or complete POST /v1/chat/completions by auto-discovering local models from ~/.llmhub/models and RAM, eliminating demo mode trap on localhost, adding SSE streaming headers, and providing mobile-responsive layout for Android Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "ModelRegistry.scan_and_register_local_models automatically discovers and registers unindexed GGUF models in ~/.llmhub/models",
+        "Endpoints /api/models and /v1/models automatically include local models and active resident models from RAM",
+        "Web UI (index.html) prevents demo mode hijacking when connected to localhost/127.0.0.1 and prioritizes active resident models in the selector",
+        "Web UI displays inline guidance instead of silent alerts if models are missing and ensures POST /v1/chat/completions is fired reliably",
+        "Added Cache-Control and X-Accel-Buffering headers to SSE StreamingResponse to prevent buffering on mobile web browsers",
+        "Added mobile-responsive styling for screens <= 768px in index.html for Android Termux mobile browser usability",
+        "100% test pass rate across all 188 tests in test suite"
+      ]
     }
   ]
 }

@@ -236,7 +236,7 @@ class ModelManager:
             # Check if already loaded
             if model_spec in self.loaded_models:
                 loaded = self.loaded_models[model_spec]
-                loaded.last_active_time = time.time()
+                loaded.last_active_time = time.monotonic()
                 if pinned:
                     loaded.pinned = True
                 return loaded
@@ -245,13 +245,31 @@ class ModelManager:
             record = self.registry.find_model(model_spec)
             if not record:
                 cand = Path(model_spec).resolve()
+                models_dir = getattr(self.config, "models_dir", None)
                 if cand.is_file() and cand.suffix.lower() == ".gguf":
                     file_path = cand
                     tag = cand.stem
+                elif models_dir and (models_dir / model_spec).is_file():
+                    file_path = (models_dir / model_spec).resolve()
+                    tag = file_path.stem
+                elif models_dir and (models_dir / f"{model_spec}.gguf").is_file():
+                    file_path = (models_dir / f"{model_spec}.gguf").resolve()
+                    tag = file_path.stem
                 else:
-                    raise FileNotFoundError(
-                        f"Model '{model_spec}' not found in registry. Pull it first via 'llmhub pull {model_spec}'."
-                    )
+                    found = None
+                    if models_dir and models_dir.is_dir():
+                        spec_lower = model_spec.lower().replace(":", "-").replace("\\", "-")
+                        for f in models_dir.glob("*.gguf"):
+                            if spec_lower in f.stem.lower() or f.stem.lower() in spec_lower:
+                                found = f
+                                break
+                    if found:
+                        file_path = found.resolve()
+                        tag = found.stem
+                    else:
+                        raise FileNotFoundError(
+                            f"Model '{model_spec}' not found in registry. Pull it first via 'llmhub pull {model_spec}'."
+                        )
             else:
                 file_path = Path(record.file_path)
                 tag = record.tag
@@ -262,7 +280,7 @@ class ModelManager:
             # Check if resolved tag is already loaded
             if tag in self.loaded_models:
                 loaded = self.loaded_models[tag]
-                loaded.last_active_time = time.time()
+                loaded.last_active_time = time.monotonic()
                 if pinned:
                     loaded.pinned = True
                 return loaded
@@ -412,7 +430,21 @@ class ModelManager:
         if record and record.tag in self.loaded_models:
             return self.loaded_models[record.tag]
         cand = Path(model_spec).stem
-        return self.loaded_models.get(cand)
+        if cand in self.loaded_models:
+            return self.loaded_models[cand]
+        spec_clean = model_spec.lower().replace(":", "-").replace("/", "-").replace("\\", "-")
+        loaded_items = list(self.loaded_models.items())
+        # Pass 1: Exact match on sanitized identifier
+        for tag, lm in loaded_items:
+            tag_clean = tag.lower().replace(":", "-").replace("/", "-").replace("\\", "-")
+            if spec_clean == tag_clean:
+                return lm
+        # Pass 2: Prefix and substring fallback
+        for tag, lm in loaded_items:
+            tag_clean = tag.lower().replace(":", "-").replace("/", "-").replace("\\", "-")
+            if spec_clean.startswith(tag_clean) or tag_clean.startswith(spec_clean) or spec_clean in tag_clean or tag_clean in spec_clean:
+                return lm
+        return None
 
     async def get_or_load_model(self, model_spec: str) -> LoadedModel:
         """Retrieve loaded model or trigger dynamic load via admission controller."""
@@ -523,5 +555,6 @@ class ModelManager:
             "system_ram_total_mb": round(prof.total_ram_bytes / (1024 * 1024), 1),
             "system_ram_free_mb": round(prof.free_ram_bytes / (1024 * 1024), 1),
             "safety_margin": self.safety_margin,
-            "models": models_data
+            "models": models_data,
+            "resident_models": {m["tag"]: m for m in models_data},
         }

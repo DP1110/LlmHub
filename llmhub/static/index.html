@@ -464,6 +464,86 @@
       font-size: 1rem;
     }
     .stage-card:last-child::after { content: ""; }
+
+    /* Mobile-Responsive Optimizations for Android Termux */
+    .mobile-only { display: none; }
+    @media (max-width: 768px) {
+      .mobile-only { display: inline-flex; }
+      header {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.6rem;
+        padding: 0.6rem 0.8rem;
+        height: auto;
+      }
+      .brand {
+        justify-content: space-between;
+      }
+      .header-status {
+        justify-content: space-between;
+        width: 100%;
+      }
+      nav {
+        overflow-x: auto;
+        white-space: nowrap;
+        -webkit-overflow-scrolling: touch;
+        padding: 0.2rem;
+      }
+      .tab-btn {
+        padding: 0.35rem 0.65rem;
+        font-size: 0.775rem;
+      }
+      #view-chat {
+        flex-direction: column;
+      }
+      .chat-sidebar {
+        width: 100%;
+        max-height: none;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 0.65rem 0.85rem;
+        gap: 0.6rem;
+      }
+      .chat-sidebar-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .chat-sidebar-collapsible {
+        display: none;
+        flex-direction: column;
+        gap: 0.6rem;
+        padding-top: 0.5rem;
+        border-top: 1px dashed var(--border);
+      }
+      .chat-sidebar.expanded .chat-sidebar-collapsible {
+        display: flex;
+      }
+      .chat-messages {
+        padding: 1rem 0.8rem;
+        gap: 1rem;
+      }
+      .message {
+        gap: 0.6rem;
+      }
+      .message-avatar {
+        width: 28px;
+        height: 28px;
+        font-size: 0.75rem;
+      }
+      .chat-input-bar {
+        padding: 0.65rem 0.8rem;
+      }
+      .chat-textarea {
+        font-size: 0.9rem;
+      }
+      .dashboard-container {
+        padding: 1rem 0.8rem;
+      }
+      .grid-2, .grid-3 {
+        grid-template-columns: 1fr;
+      }
+    }
   </style>
 </head>
 <body>
@@ -510,36 +590,45 @@
 
     <!-- 1. CHAT VIEW -->
     <div id="view-chat" class="view-panel active">
-      <div class="chat-sidebar">
+      <div class="chat-sidebar" id="chat-sidebar">
         <div class="sidebar-section">
-          <label class="sidebar-label">Active Model</label>
-          <select id="chat-model-select">
+          <div class="chat-sidebar-header">
+            <label class="sidebar-label">Active Model</label>
+            <button type="button" class="btn btn-secondary mobile-only" id="mobile-param-toggle" onclick="toggleMobileParams()" style="font-size:0.75rem; padding:0.2rem 0.5rem;">⚙ Settings</button>
+          </div>
+          <select id="chat-model-select" onchange="onModelSelectChanged()">
             <option value="">Loading models...</option>
           </select>
         </div>
 
-        <div class="sidebar-section">
-          <div class="slider-row">
-            <label class="sidebar-label">Temperature</label>
-            <span id="temp-val" class="font-mono">0.7</span>
+        <div id="chat-collapsible-settings" class="chat-sidebar-collapsible">
+          <div class="sidebar-section">
+            <div class="slider-row">
+              <label class="sidebar-label">Temperature</label>
+              <span id="temp-val" class="font-mono">0.7</span>
+            </div>
+            <input type="range" id="chat-temp" min="0.0" max="1.5" step="0.05" value="0.7" oninput="document.getElementById('temp-val').textContent=this.value">
           </div>
-          <input type="range" id="chat-temp" min="0.0" max="1.5" step="0.05" value="0.7" oninput="document.getElementById('temp-val').textContent=this.value">
-        </div>
 
-        <div class="sidebar-section">
-          <div class="slider-row">
-            <label class="sidebar-label">Max Tokens</label>
-            <span id="max-tok-val" class="font-mono">512</span>
+          <div class="sidebar-section">
+            <div class="slider-row">
+              <label class="sidebar-label">Max Tokens</label>
+              <span id="max-tok-val" class="font-mono">512</span>
+            </div>
+            <input type="range" id="chat-max-tokens" min="64" max="4096" step="64" value="512" oninput="document.getElementById('max-tok-val').textContent=this.value">
           </div>
-          <input type="range" id="chat-max-tokens" min="64" max="4096" step="64" value="512" oninput="document.getElementById('max-tok-val').textContent=this.value">
+
+          <div class="sidebar-section">
+            <label class="sidebar-label">System Prompt</label>
+            <textarea id="chat-system-prompt" rows="3" placeholder="You are a helpful, offline AI assistant.">You are a helpful, offline AI assistant running locally on LLMHub.</textarea>
+          </div>
+
+          <div class="sidebar-section">
+            <button class="btn btn-secondary" style="font-size:0.8rem; padding:0.4rem;" onclick="clearChat()">Clear Chat</button>
+          </div>
         </div>
 
-        <div class="sidebar-section">
-          <label class="sidebar-label">System Prompt</label>
-          <textarea id="chat-system-prompt" rows="4" placeholder="You are a helpful, offline AI assistant.">You are a helpful, offline AI assistant running locally on LLMHub.</textarea>
-        </div>
-
-        <div class="sidebar-section" style="margin-top:auto;">
+        <div class="sidebar-section" style="margin-top:auto; display:none;" id="desktop-clear-chat-container">
           <button class="btn btn-secondary" onclick="clearChat()">Clear Chat</button>
         </div>
       </div>
@@ -788,43 +877,98 @@
       if (tabId === 'system') refreshSystemData();
     }
 
+    function toggleMobileParams() {
+      const sidebar = document.getElementById('chat-sidebar');
+      if (sidebar) sidebar.classList.toggle('expanded');
+    }
+
+    function onModelSelectChanged() {
+      const select = document.getElementById('chat-model-select');
+      if (select.value === '__custom__') {
+        const custom = prompt("Enter model tag or filename (e.g. Qwen2.5-0.5B-Instruct-GGUF:q4_k_m or model.gguf):");
+        if (custom && custom.trim()) {
+          const val = custom.trim();
+          const opt = document.createElement('option');
+          opt.value = val;
+          opt.textContent = `[Custom] ${val}`;
+          select.insertBefore(opt, select.firstChild);
+          select.value = val;
+        } else {
+          select.selectedIndex = 0;
+        }
+      }
+    }
+
     // Server health polling
     async function checkServerHealth() {
+      const isHostedOnGithub = window.location.origin.includes('github.io');
       try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 1800);
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         const res = await fetch(`${apiBase}/healthz`, { signal: controller.signal });
         clearTimeout(timeoutId);
 
         if (res.ok) {
           const data = await res.json();
+          const wasDemo = isDemoMode;
           isDemoMode = false;
-          document.getElementById('server-status-pill').style.display = 'flex';
-          document.getElementById('server-status-text').textContent = 'ONLINE';
-          document.getElementById('sys-uptime').textContent = Math.round(data.uptime_seconds) + 's';
-          document.getElementById('sys-termux').textContent = data.termux?.is_termux ? 'YES (ARM64)' : 'NO (PC/Server)';
-          if (data.termux?.thermal_state) document.getElementById('sys-thermal').textContent = data.termux.thermal_state.toUpperCase();
-          if (data.termux?.memory_pressure) document.getElementById('sys-lmk').textContent = data.termux.memory_pressure.toUpperCase();
+          const statusPill = document.getElementById('server-status-pill');
+          if (statusPill) statusPill.style.display = 'flex';
+          const statusText = document.getElementById('server-status-text');
+          if (statusText) {
+            statusText.textContent = 'ONLINE';
+            statusText.style.color = '#10b981';
+          }
+          const upElem = document.getElementById('sys-uptime');
+          if (upElem) upElem.textContent = Math.round(data.uptime_seconds) + 's';
+          const termuxElem = document.getElementById('sys-termux');
+          if (termuxElem) termuxElem.textContent = data.termux?.is_termux ? 'YES (ARM64)' : 'NO (PC/Server)';
+          if (data.termux?.thermal_state) {
+            const thElem = document.getElementById('sys-thermal');
+            if (thElem) thElem.textContent = data.termux.thermal_state.toUpperCase();
+          }
+          if (data.termux?.memory_pressure) {
+            const lmkElem = document.getElementById('sys-lmk');
+            if (lmkElem) lmkElem.textContent = data.termux.memory_pressure.toUpperCase();
+          }
+
+          if (wasDemo || allDownloadedModels.length === 0) {
+            refreshModelsData();
+          }
           return;
         }
       } catch (err) {
-        // Fall back to Demo Mode for GitHub Pages showcase
+        // Fall back to Demo Mode ONLY for GitHub Pages showcase
       }
 
-      // Enter Demo Showcase Mode
-      isDemoMode = true;
-      document.getElementById('server-status-pill').style.display = 'flex';
-      document.getElementById('server-status-text').textContent = 'DEMO SHOWCASE';
-      document.getElementById('sys-uptime').textContent = 'Simulator Mode';
-      document.getElementById('sys-termux').textContent = 'Web Emulation (ARM64)';
-      document.getElementById('sys-thermal').textContent = 'NOMINAL';
-      document.getElementById('sys-lmk').textContent = 'NORMAL';
+      if (isHostedOnGithub) {
+        // Enter Demo Showcase Mode
+        isDemoMode = true;
+        const statusPill = document.getElementById('server-status-pill');
+        if (statusPill) statusPill.style.display = 'flex';
+        const statusText = document.getElementById('server-status-text');
+        if (statusText) {
+          statusText.textContent = 'DEMO SHOWCASE';
+          statusText.style.color = 'var(--text-muted)';
+        }
+        document.getElementById('sys-uptime').textContent = 'Simulator Mode';
+        document.getElementById('sys-termux').textContent = 'Web Emulation (ARM64)';
+        document.getElementById('sys-thermal').textContent = 'NOMINAL';
+        document.getElementById('sys-lmk').textContent = 'NORMAL';
 
-      allDownloadedModels = DEMO_MODELS;
-      residentModels = demoResidentModels;
-      renderModelsList();
-      renderResidentModels();
-      updateChatSelect();
+        allDownloadedModels = DEMO_MODELS;
+        residentModels = demoResidentModels;
+        renderModelsList();
+        renderResidentModels();
+        updateChatSelect();
+      } else {
+        isDemoMode = false;
+        const statusText = document.getElementById('server-status-text');
+        if (statusText) {
+          statusText.textContent = 'OFFLINE';
+          statusText.style.color = 'var(--danger)';
+        }
+      }
     }
 
     // 1. Models Data Loader
@@ -851,7 +995,14 @@
         if (psRes.ok) {
           const psData = await psRes.json();
           residentModels = psData.resident_models || {};
+          if ((!residentModels || Object.keys(residentModels).length === 0) && Array.isArray(psData.models)) {
+            residentModels = {};
+            psData.models.forEach(m => {
+              if (m.tag) residentModels[m.tag] = m;
+            });
+          }
           renderResidentModels();
+          updateChatSelect();
         }
       } catch (err) {
         console.error("Failed to load models data", err);
@@ -862,19 +1013,44 @@
       const select = document.getElementById('chat-model-select');
       const currentVal = select.value;
       select.innerHTML = '';
-      if (allDownloadedModels.length === 0) {
-        select.innerHTML = '<option value="">No models installed</option>';
+
+      const modelMap = new Map();
+      allDownloadedModels.forEach(m => modelMap.set(m.tag, { ...m, isResident: !!residentModels[m.tag] }));
+      Object.keys(residentModels || {}).forEach(tag => {
+        if (!modelMap.has(tag)) {
+          modelMap.set(tag, { tag: tag, isResident: true, arch: 'loaded' });
+        } else {
+          modelMap.get(tag).isResident = true;
+        }
+      });
+
+      const models = Array.from(modelMap.values());
+
+      if (models.length === 0) {
+        select.innerHTML = '<option value="">No models installed (~/.llmhub/models)</option><option value="__custom__">⚙ Enter Custom Model Tag / Path...</option>';
         return;
       }
-      allDownloadedModels.forEach(m => {
+
+      // Sort so resident models in RAM appear first
+      models.sort((a, b) => (b.isResident ? -1 : 1) - (a.isResident ? -1 : 1));
+
+      models.forEach(m => {
         const opt = document.createElement('option');
         opt.value = m.tag;
-        const isLoaded = !!residentModels[m.tag];
-        opt.textContent = `${m.tag} ${isLoaded ? '● (in RAM)' : ''}`;
+        opt.textContent = `${m.isResident ? '● [IN RAM] ' : ''}${m.tag}`;
         select.appendChild(opt);
       });
-      if (currentVal && allDownloadedModels.some(m => m.tag === currentVal)) {
+
+      const customOpt = document.createElement('option');
+      customOpt.value = '__custom__';
+      customOpt.textContent = '⚙ Enter Custom Model Tag / Path...';
+      select.appendChild(customOpt);
+
+      if (currentVal && models.some(m => m.tag === currentVal)) {
         select.value = currentVal;
+      } else {
+        const firstResident = models.find(m => m.isResident);
+        select.value = firstResident ? firstResident.tag : models[0].tag;
       }
     }
 
@@ -921,7 +1097,7 @@
           <tr>
             <td class="tag-badge">${m.tag}</td>
             <td>${sizeMb} MB</td>
-            <td>${m.arch || 'transformer'}</td>
+            <td>${m.architecture || m.arch || 'transformer'}</td>
             <td><span class="badge badge-blue">${m.quant || 'GGUF'}</span></td>
             <td><span class="badge ${isLoaded ? 'badge-green' : 'badge-blue'}">${isLoaded ? 'RESIDENT' : 'ON DISK'}</span></td>
             <td>
@@ -1047,9 +1223,33 @@
       const text = input.value.trim();
       if (!text) return;
 
-      const model = document.getElementById('chat-model-select').value;
-      if (!model) {
-        alert("Please download or select a model first.");
+      let model = document.getElementById('chat-model-select').value;
+      if (!model || model === '__custom__') {
+        const residentKeys = Object.keys(residentModels || {});
+        if (residentKeys.length > 0) {
+          model = residentKeys[0];
+          document.getElementById('chat-model-select').value = model;
+        } else if (allDownloadedModels.length > 0) {
+          model = allDownloadedModels[0].tag;
+          document.getElementById('chat-model-select').value = model;
+        }
+      }
+
+      if (!model || model === '__custom__') {
+        appendMessageUI('user', text);
+        input.value = '';
+        const assistMsg = appendMessageUI('assistant', '');
+        const content = assistMsg.querySelector('.message-content');
+        content.innerHTML = `
+          <div style="color:var(--danger); font-weight:600; margin-bottom:0.4rem;">⚠️ No model is installed or selected.</div>
+          <div style="font-size:0.85rem; color:var(--text-muted); line-height:1.4;">
+            To chat offline, please download a model in Termux using:<br/>
+            <code style="display:inline-block; margin:0.3rem 0; padding:0.2rem 0.5rem; background:#18181b; border-radius:4px; color:#fff;">
+              llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m
+            </code><br/>
+            or choose <i>⚙ Enter Custom Model Tag / Path...</i> in the Active Model dropdown above.
+          </div>
+        `;
         return;
       }
 
@@ -1087,17 +1287,25 @@
       let firstTokenT = null;
 
       try {
-        const systemPrompt = document.getElementById('chat-system-prompt').value.trim();
+        const systemPromptElem = document.getElementById('chat-system-prompt');
+        const systemPrompt = systemPromptElem ? systemPromptElem.value.trim() : '';
         const messages = [];
         if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
         messages.push(...chatHistory);
 
-        const temperature = parseFloat(document.getElementById('chat-temp').value);
-        const max_tokens = parseInt(document.getElementById('chat-max-tokens').value);
+        const tempElem = document.getElementById('chat-temp');
+        const maxTokElem = document.getElementById('chat-max-tokens');
+        const temperature = tempElem ? parseFloat(tempElem.value) : 0.7;
+        const max_tokens = maxTokElem ? parseInt(maxTokElem.value) : 512;
+
+        contentElem.textContent = '● Connecting...';
 
         const response = await fetch(`${apiBase}/v1/chat/completions`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream'
+          },
           body: JSON.stringify({
             model: model,
             messages: messages,
@@ -1114,8 +1322,9 @@
           return;
         }
 
+        contentElem.textContent = '';
         const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder('utf-8');
         let buffer = '';
 
         while (true) {
@@ -1134,6 +1343,10 @@
 
             try {
               const parsed = JSON.parse(dataStr);
+              if (parsed.error) {
+                contentElem.textContent += `\n[Server Error]: ${parsed.error}`;
+                break;
+              }
               const delta = parsed.choices?.[0]?.delta?.content || '';
               if (delta) {
                 if (!firstTokenT) firstTokenT = performance.now();
@@ -1143,7 +1356,7 @@
 
                 const elapsed = (performance.now() - startT) / 1000;
                 const ttft = firstTokenT ? Math.round(firstTokenT - startT) : '--';
-                const tps = (tokenCount / elapsed).toFixed(1);
+                const tps = elapsed > 0 ? (tokenCount / elapsed).toFixed(1) : '0.0';
                 statsElem.textContent = `${tokenCount} tokens • ${tps} tok/s • TTFT: ${ttft}ms`;
 
                 const container = document.getElementById('chat-messages');
@@ -1151,6 +1364,15 @@
               }
             } catch (err) {}
           }
+        }
+
+        if (!streamedText && buffer) {
+          try {
+            const parsed = JSON.parse(buffer);
+            const content = parsed.choices?.[0]?.message?.content;
+            if (content) streamedText = content;
+            contentElem.textContent = streamedText;
+          } catch (e) {}
         }
 
         chatHistory.push({ role: 'assistant', content: streamedText });

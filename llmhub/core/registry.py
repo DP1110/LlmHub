@@ -8,7 +8,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 class ModelRecord:
     def __init__(
@@ -217,7 +217,138 @@ class ModelRegistry:
 
             if row:
                 return self._row_to_record(row)
+
+            # Fallback 1: Case-insensitive match across registered tags and names
+            clean_spec = spec.lower().replace(":", "-").replace("/", "-").replace("\\", "-").replace("_", "-")
+            all_rows = conn.execute("SELECT * FROM models ORDER BY id DESC").fetchall()
+            for r in all_rows:
+                tag = f"{r['org']}/{r['name']}:{r['quant']}".lower()
+                tag_short = f"{r['name']}:{r['quant']}".lower()
+                stem_name = r['name'].lower()
+                candidates = [
+                    tag,
+                    tag_short,
+                    stem_name,
+                    tag.replace(":", "-").replace("/", "-").replace("\\", "-"),
+                    tag_short.replace(":", "-"),
+                    tag.replace(":", "-").replace("/", "-").replace("\\", "-").replace("_", "-"),
+                    tag_short.replace(":", "-").replace("_", "-"),
+                    stem_name.replace(":", "-").replace("_", "-"),
+                ]
+                if spec.lower() in candidates or clean_spec in candidates:
+                    return self._row_to_record(r)
+
+        # Fallback 2: Check if spec points directly to an existing GGUF file
+        cand = Path(spec)
+        if cand.is_file() and cand.suffix.lower() == ".gguf":
+            try:
+                from llmhub.core.gguf_parser import GGUFParser
+                meta = GGUFParser.parse_file(cand)
+                manifest_path = cand.with_suffix(".json")
+                if not manifest_path.exists():
+                    manifest_path = cand
+                return self.register_model(
+                    org="local",
+                    name=cand.stem,
+                    quant="gguf",
+                    file_path=cand.resolve(),
+                    manifest_path=manifest_path.resolve(),
+                    size_bytes=cand.stat().st_size,
+                    sha256="",
+                    architecture=meta.architecture or "llama",
+                    n_layers=meta.block_count or 0,
+                    n_kv_heads=meta.head_count_kv or 0,
+                    head_dim=meta.head_dim or 0,
+                    ctx_max=meta.context_length or 2048,
+                )
+            except Exception:
+                pass
+
         return None
+
+    def scan_and_register_local_models(self, models_dir: Union[str, Path]) -> List[ModelRecord]:
+        """Scan directory for any .gguf files not yet in the registry and register them."""
+        p_dir = Path(models_dir)
+        if not p_dir.is_dir():
+            return []
+
+        from llmhub.core.gguf_parser import GGUFParser
+
+        registered: List[ModelRecord] = []
+        try:
+            candidates = list(p_dir.rglob("*.gguf"))
+        except Exception:
+            candidates = []
+
+        seen_paths = set()
+        deduped = []
+        for c in candidates:
+            resolved = str(c.resolve())
+            if resolved not in seen_paths:
+                seen_paths.add(resolved)
+                deduped.append(c)
+
+        for fpath in deduped:
+            if not fpath.is_file() or fpath.suffix.lower() != ".gguf":
+                continue
+
+            resolved_str = str(fpath.resolve())
+            with self._get_connection() as conn:
+                existing = conn.execute("SELECT id FROM models WHERE file_path=?", (resolved_str,)).fetchone()
+            if existing:
+                continue
+
+            try:
+                meta = GGUFParser.parse_file(fpath)
+                stem = fpath.stem
+                org = "local"
+                name = stem
+                quant = "gguf"
+
+                # Check if directory layout follows models/<org>/<name>/<quant>/model.gguf
+                rel = fpath.relative_to(p_dir).parts
+                if len(rel) >= 4:
+                    org = rel[0]
+                    name = rel[1]
+                    quant = rel[2].lower()
+                elif len(rel) == 3:
+                    org = rel[0]
+                    name = rel[1]
+                    file_stem = Path(rel[2]).stem.lower()
+                    if any(q in file_stem for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
+                        quant = file_stem
+                    else:
+                        quant = "gguf"
+                elif "-" in stem or "_" in stem or ":" in stem:
+                    parts = stem.replace(":", "-").split("-")
+                    last_part = parts[-1].lower()
+                    if any(q in last_part for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
+                        quant = last_part
+                        name = "-".join(parts[:-1])
+
+                manifest_path = fpath.with_suffix(".json")
+                if not manifest_path.exists():
+                    manifest_path = fpath
+
+                rec = self.register_model(
+                    org=org,
+                    name=name,
+                    quant=quant,
+                    file_path=fpath.resolve(),
+                    manifest_path=manifest_path.resolve(),
+                    size_bytes=fpath.stat().st_size,
+                    sha256="",
+                    architecture=meta.architecture or "llama",
+                    n_layers=meta.block_count or 0,
+                    n_kv_heads=meta.head_count_kv or 0,
+                    head_dim=meta.head_dim or 0,
+                    ctx_max=meta.context_length or 2048,
+                )
+                registered.append(rec)
+            except Exception:
+                continue
+
+        return registered
 
     def remove_model(self, model_spec: str) -> Optional[ModelRecord]:
         record = self.find_model(model_spec)

@@ -275,6 +275,48 @@ def test_model_manager_get_ps_matrix():
     assert "system_ram_free_mb" in ps
     assert "models" in ps
     assert isinstance(ps["models"], list)
+    assert "resident_models" in ps
+    assert isinstance(ps["resident_models"], dict)
+
+
+def test_model_manager_monotonic_idle_clock(mock_registry):
+    """Verify that re-touching loaded model keeps last_active_time on monotonic clock."""
+    async def _run():
+        with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=create_mock_metadata()):
+            with patch.object(ModelManager, "get_free_ram_bytes", return_value=8 * 1024 * 1024 * 1024):
+                mgr = ModelManager(
+                    registry=mock_registry,
+                    backend_factory=lambda: MockBackend(),
+                )
+                m1 = await mgr.load_model("m1")
+                # Reload model (cache hit path)
+                m1_again = await mgr.load_model("m1")
+                # Clock should be monotonic (not Unix epoch 1.7e9)
+                now_mono = time.monotonic()
+                assert abs(m1_again.last_active_time - now_mono) < 5.0
+                assert m1_again.idle_seconds >= 0.0
+                assert m1_again.idle_seconds < 10.0
+
+    asyncio.run(_run())
+
+
+def test_model_manager_get_model_two_pass_matching(mock_registry):
+    """Verify that exact sanitized match takes precedence over prefix/substring match."""
+    async def _run():
+        with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=create_mock_metadata()):
+            with patch.object(ModelManager, "get_free_ram_bytes", return_value=8 * 1024 * 1024 * 1024):
+                mgr = ModelManager(
+                    registry=mock_registry,
+                    backend_factory=lambda: MockBackend(),
+                )
+                m_base = await mgr.load_model("qwen2.5-0.5b")
+                m_inst = await mgr.load_model("qwen2.5-0.5b-instruct")
+
+                # Exact match queries
+                assert mgr.get_model("qwen2.5-0.5b") is m_base
+                assert mgr.get_model("qwen2.5-0.5b-instruct") is m_inst
+
+    asyncio.run(_run())
 
 
 def test_model_manager_termux_non_root_mlock_disabled(mock_registry):
