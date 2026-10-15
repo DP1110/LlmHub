@@ -473,7 +473,7 @@ def test_model_runner_cli_fallback_when_llama_cpp_absent(tmp_path: Path, monkeyp
             mock_proc.poll.return_value = 0
             mock_popen.return_value = mock_proc
 
-            chunks = list(runner.stream_completion(prompt="Hello"))
+            chunks = list(runner.stream_completion(prompt="Write a greeting"))
             assert len(chunks) >= 2
             # Verify stream tokens reconstructed full text
             full_text = "".join(c["token"] for c in chunks)
@@ -519,4 +519,220 @@ def test_model_runner_cli_generator_early_close(tmp_path: Path, monkeypatch: pyt
 
             # Verify subprocess cleanup was invoked
             assert mock_proc.terminate.called or mock_proc.kill.called
+
+
+def test_runner_cli_flags_and_prompt_echo_stripping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure -st flag is passed to llama-cli and echoed prompt is automatically stripped."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_echo.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            # Simulate llama-cli echoing prompt first before generating response
+            mock_proc.stdout = io.StringIO("What is AI?\nAI is artificial intelligence.")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt="What is AI?"))
+            # The prompt "What is AI?" should have been stripped, leaving only the generated response
+            full_text = "".join(c["token"] for c in chunks)
+            assert "What is AI?" not in full_text
+            assert "AI is artificial intelligence." in full_text
+            assert chunks[-1]["done"] is True
+
+            # Verify -st flag was passed in command
+            called_cmd = mock_popen.call_args[0][0]
+            assert "-st" in called_cmd or "--single-turn" in called_cmd
+
+
+def test_runner_cli_error_surfacing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure non-zero exit code with 0 tokens raises descriptive RuntimeError with stderr."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_err.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("")
+            mock_proc.stderr = io.StringIO("error: failed to load model weights: out of memory\n")
+            mock_proc.poll.return_value = 1
+            mock_proc.returncode = 1
+            mock_popen.return_value = mock_proc
+
+            with pytest.raises(RuntimeError, match="out of memory"):
+                list(runner.stream_completion(prompt="Hello"))
+
+
+def test_llamacpp_backend_cli_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend falls back to native llama-cli and decodes successfully."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as llamacpp_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "model.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    with patch("llmhub.server.llamacpp.GGUFParser.parse_file") as mock_parse:
+        mock_meta = MagicMock()
+        mock_meta.model_name = "test-model"
+        mock_meta.architecture = "llama"
+        mock_meta.block_count = 16
+        mock_meta.head_count_kv = 4
+        mock_meta.head_dim = 64
+        mock_parse.return_value = mock_meta
+
+        backend = LlamaCppBackend()
+        backend.load(dummy, n_ctx=1024, n_threads=4)
+        assert backend.is_loaded()
+        assert backend._cli_binary == "/usr/bin/llama-cli"
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Hello from Termux native runtime!")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            sess = backend.new_session("sess-1", prompt="Greet me")
+            assert sess.session_id == "sess-1"
+
+            # Execute decode steps
+            res1 = backend.decode_step("sess-1", n_tokens=2)
+            assert len(res1.text_deltas) >= 1
+
+            # Drain remainder
+            res2 = backend.decode_step("sess-1", n_tokens=10)
+            assert "Hello from Termux native runtime!" in sess.generated_text
+
+            backend.close_session("sess-1")
+            assert "sess-1" not in backend.sessions
+            backend.unload()
+            assert not backend.is_loaded()
+
+
+def test_llamacpp_backend_cli_error_surfacing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend raises RuntimeError when llama-cli exits non-zero with 0 tokens."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as llamacpp_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "model_fail.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    with patch("llmhub.server.llamacpp.GGUFParser.parse_file"):
+        backend = LlamaCppBackend()
+        backend.load(dummy, n_ctx=1024, n_threads=4)
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("")
+            mock_proc.stderr = io.StringIO("CANNOT LINK EXECUTABLE 'llama-cli': library 'libopenblas.so' not found\n")
+            mock_proc.poll.return_value = 1
+            mock_proc.returncode = 1
+            mock_popen.return_value = mock_proc
+
+            sess = backend.new_session("sess-fail", prompt="Hello")
+
+            with pytest.raises(RuntimeError, match="libopenblas.so"):
+                backend.decode_step("sess-fail", n_tokens=1)
+
+
+def test_runner_cli_partial_prompt_match_at_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure partial prompt prefix match at EOF is flushed and not lost."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_partial.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    # Invalidate CLI flags cache to test dynamic lookup without --no-display-prompt
+    runner_mod._CLI_FLAGS_CACHE.clear()
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            # Prompt is "Long prompt text", output starts matching "Long" but terminates
+            mock_proc.stdout = io.StringIO("Long")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            with patch("subprocess.run") as mock_run:
+                # Simulate --help output that does not include --no-display-prompt
+                mock_run.return_value = MagicMock(stdout="-st, --single-turn", stderr="")
+
+                chunks = list(runner.stream_completion(prompt="Long prompt text"))
+                full_text = "".join(c["token"] for c in chunks)
+                # "Long" was not full prompt, so it should be preserved
+                assert "Long" in full_text
+
+
+def test_runner_cli_reverse_prompt_stop_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure stop sequences are passed via -r and stop execution early."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_stop.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st", "-r", "--no-display-prompt"}
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Here is the answer.<|im_end|>More ignored text")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt="Question", stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+            assert "Here is the answer." in full_text
+            assert "More ignored text" not in full_text
+
+            # Check -r was passed
+            called_cmd = mock_popen.call_args[0][0]
+            assert "-r" in called_cmd
+
+
 

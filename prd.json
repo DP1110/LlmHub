@@ -828,6 +828,32 @@
         "test_model_runner_error_when_neither_available validates missing backend guidance",
         "100% test pass rate across all 166 tests in test suite"
       ]
+    },
+    {
+      "id": "US-065",
+      "title": "Single-Turn Flag Enforcement and Prompt Echo Filtering in Native llama-cli Runner",
+      "phase": 11,
+      "description": "Pass -st / --single-turn flag to prevent llama-cli from terminating immediately on EOF in interactive mode, detect and filter echoed prompts, and capture stderr output on non-zero return codes.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Dynamic discovery of supported CLI flags (-st, --single-turn, --no-display-prompt, --log-disable)",
+        "Zero token exit in 0.02s eliminated by passing single-turn execution flag",
+        "Automatic detection and stripping of prompt echo when --no-display-prompt is unsupported",
+        "Captured stderr surfaced in RuntimeError on subprocess failure"
+      ]
+    },
+    {
+      "id": "US-066",
+      "title": "Native llama-cli Subprocess Backend in LlamaCppBackend for Daemon Inference",
+      "phase": 11,
+      "description": "Enable LlamaCppBackend to load and generate tokens via native llama-cli subprocess when llama-cpp-python C-bindings are not installed, enabling server daemon inference on Termux ARM64 without HTTP 500 errors.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "LlamaCppBackend detects and binds to llama-cli when llama-cpp-python is absent",
+        "new_session spawns streaming token generator wrapping llama-cli stdout",
+        "decode_step smoothly yields token chunks into quantum round-robin scheduler",
+        "Seamless SSE streaming and non-streaming HTTP completions via daemon without 500 errors"
+      ]
     }
   ]
 }

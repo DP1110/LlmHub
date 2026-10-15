@@ -20,17 +20,19 @@ from llmhub.server.backend import Backend, DecodeResult, SessionState
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
 
 class LlamaCppBackend(Backend):
-    """Local CPU execution engine powered by llama.cpp."""
+    """Local CPU execution engine powered by llama.cpp (with llama_cpp and native llama-cli support)."""
 
     def __init__(self) -> None:
         self.llm: Optional[Any] = None
+        self._cli_binary: Optional[str] = None
         self.model_path: Optional[Path] = None
         self.n_ctx: int = 2048
         self.n_threads: int = 4
         self.metadata: Optional[GGUFMetadata] = None
         self.sessions: Dict[str, SessionState] = {}
-        # Keep generator objects per session for smooth token streaming
+        # Keep generator objects and subprocesses per session for smooth token streaming
         self._generators: Dict[str, Any] = {}
+        self._processes: Dict[str, Any] = {}
 
     def load(
         self,
@@ -52,20 +54,29 @@ class LlamaCppBackend(Backend):
         self.n_threads = n_threads
         self.metadata = GGUFParser.parse_file(self.model_path)
 
-        if not HAS_LLAMA_CPP or llama_cpp is None:
-            raise RuntimeError(
-                "llama-cpp-python is not installed. To run models locally, install llama-cpp-python or use native llama.cpp."
+        if HAS_LLAMA_CPP and llama_cpp is not None:
+            self.llm = llama_cpp.Llama(
+                model_path=str(self.model_path),
+                n_ctx=self.n_ctx,
+                n_threads=self.n_threads,
+                n_batch=kwargs.get("n_batch", 512),
+                use_mmap=use_mmap,
+                use_mlock=use_mlock,
+                verbose=kwargs.get("verbose", False)
             )
-
-        self.llm = llama_cpp.Llama(
-            model_path=str(self.model_path),
-            n_ctx=self.n_ctx,
-            n_threads=self.n_threads,
-            n_batch=kwargs.get("n_batch", 512),
-            use_mmap=use_mmap,
-            use_mlock=use_mlock,
-            verbose=kwargs.get("verbose", False)
-        )
+        else:
+            import shutil
+            import sys
+            cand = shutil.which("llama-cli") or shutil.which("llama")
+            if not cand and sys.platform != "win32":
+                cand = shutil.which("main")
+            self._cli_binary = cand
+            if not self._cli_binary:
+                raise RuntimeError(
+                    "Neither 'llama-cpp-python' nor native 'llama-cli' binary was found.\n"
+                    "To enable model inference in Termux, install native llama.cpp with:\n"
+                    "  pkg install llama-cpp"
+                )
 
     def unload(self) -> None:
         for s in list(self.sessions.keys()):
@@ -77,11 +88,166 @@ class LlamaCppBackend(Backend):
                 except Exception:
                     pass
             self.llm = None
+        self._cli_binary = None
         self.model_path = None
         self.metadata = None
 
     def is_loaded(self) -> bool:
-        return self.llm is not None
+        return (self.llm is not None) or (self._cli_binary is not None)
+
+    def _create_cli_generator(
+        self,
+        prompt: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stop: Optional[List[str]]
+    ) -> Tuple[Any, Any]:
+        """Spawn a streaming generator wrapping native llama-cli subprocess."""
+        import subprocess
+        import threading
+        from llmhub.core.runner import get_cli_supported_flags
+
+        flags = get_cli_supported_flags(self._cli_binary)
+        cmd = [
+            self._cli_binary,
+            "-m", str(self.model_path),
+            "-p", prompt,
+            "-n", str(max_tokens),
+            "--temp", str(temperature),
+            "--top-p", str(top_p),
+            "-t", str(self.n_threads),
+            "-c", str(self.n_ctx),
+        ]
+        if "-st" in flags:
+            cmd.append("-st")
+        elif "--single-turn" in flags:
+            cmd.append("--single-turn")
+        else:
+            cmd.append("-st")
+
+        no_display_prompt_active = False
+        if "--no-display-prompt" in flags:
+            cmd.append("--no-display-prompt")
+            no_display_prompt_active = True
+        if "--log-disable" in flags:
+            cmd.append("--log-disable")
+
+        has_reverse_prompt = ("-r" in flags) or ("--reverse-prompt" in flags)
+        if has_reverse_prompt and stop:
+            for s in stop:
+                cmd.extend(["-r", s])
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1
+        )
+
+        stderr_chunks: List[str] = []
+        def _drain_stderr() -> None:
+            try:
+                if proc.stderr:
+                    for line in proc.stderr:
+                        stderr_chunks.append(line)
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_drain_stderr, daemon=True)
+        t.start()
+
+        def _gen():
+            buffer = ""
+            initial_buffer = ""
+            prompt_stripped = not bool(prompt)
+            tokens_yielded = 0
+            accumulated_output = ""
+            hit_stop = False
+            try:
+                while not hit_stop:
+                    char = proc.stdout.read(1)
+                    if not char:
+                        break
+
+                    # Detect and strip echoed prompt
+                    if not prompt_stripped:
+                        initial_buffer += char
+                        if len(initial_buffer) <= len(prompt):
+                            if initial_buffer == prompt[:len(initial_buffer)]:
+                                if len(initial_buffer) == len(prompt):
+                                    prompt_stripped = True
+                                continue
+                            else:
+                                prompt_stripped = True
+                                buffer = initial_buffer
+                                initial_buffer = ""
+                        else:
+                            prompt_stripped = True
+                            buffer = initial_buffer
+                            initial_buffer = ""
+                    else:
+                        buffer += char
+
+                    accumulated_output += char
+                    if stop:
+                        for s in stop:
+                            if s in accumulated_output:
+                                hit_stop = True
+                                break
+                    if hit_stop:
+                        break
+
+                    if char in (" ", "\n", "\t") or len(buffer) >= 6:
+                        tokens_yielded += 1
+                        yield {"choices": [{"text": buffer}]}
+                        buffer = ""
+
+                # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
+                if not prompt_stripped and initial_buffer:
+                    buffer = initial_buffer + buffer
+                    initial_buffer = ""
+                    prompt_stripped = True
+
+                if buffer:
+                    tokens_yielded += 1
+                    yield {"choices": [{"text": buffer}]}
+            finally:
+                for stream in (proc.stdout, proc.stderr):
+                    if stream:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except (subprocess.TimeoutExpired, Exception):
+                        proc.kill()
+                        proc.wait()
+                else:
+                    try:
+                        proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
+                t.join(timeout=0.5)
+
+            # Check if process crashed with non-zero exit code and 0 tokens yielded (CRIT-1)
+            if proc.returncode is not None and proc.returncode != 0 and tokens_yielded == 0:
+                err_text = "".join(stderr_chunks).strip()
+                extra_hint = ""
+                if proc.returncode in (-9, 137, 9):
+                    extra_hint = " (Process terminated by SIGKILL, likely Android Low Memory Killer OOM)"
+                raise RuntimeError(
+                    f"Native llama-cli failed (exit code {proc.returncode}{extra_hint}): {err_text or 'No stderr'}"
+                )
+
+        return _gen(), proc
 
     def new_session(
         self,
@@ -95,18 +261,17 @@ class LlamaCppBackend(Backend):
         seq_id: Optional[int] = None,
         **kwargs: Any,
     ) -> SessionState:
-        if not self.llm:
+        if not self.is_loaded():
             raise RuntimeError("Backend model is not loaded.")
 
         if stop is None:
             stop = ["<|im_end|>", "<|eot_id|>", "</s>", "\nUser:", "<|end_of_text|>"]
 
-        # Use pre-tokenized tokens if provided, else tokenize with llama.cpp
+        # Use pre-tokenized tokens if provided, else tokenize with llama.cpp or fallback
         if prompt_tokens is not None:
             raw_tokens = list(prompt_tokens)
         else:
-            prompt_bytes = prompt.encode("utf-8")
-            raw_tokens = list(self.llm.tokenize(prompt_bytes, add_bos=True))
+            raw_tokens = self.tokenize(prompt)
 
         session = SessionState(
             session_id=session_id,
@@ -121,16 +286,27 @@ class LlamaCppBackend(Backend):
         )
         self.sessions[session_id] = session
 
-        # Initialize streaming generator for this session
-        gen = self.llm(
-            prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stream=True,
-            stop=stop
-        )
-        self._generators[session_id] = gen
+        if self.llm is not None:
+            gen = self.llm(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stream=True,
+                stop=stop
+            )
+            self._generators[session_id] = gen
+        else:
+            gen, proc = self._create_cli_generator(
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop
+            )
+            self._generators[session_id] = gen
+            self._processes[session_id] = proc
+
         return session
 
     def prefill_chunk(self, session_id: str, max_tokens_chunk: int = 256) -> Tuple[int, bool]:
@@ -248,6 +424,18 @@ class LlamaCppBackend(Backend):
                 gen.close()
             except Exception:
                 pass
+        proc = self._processes.pop(session_id, None)
+        if proc is not None:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait()
+                    except Exception:
+                        pass
 
     def get_session(self, session_id: str) -> Optional[SessionState]:
         return self.sessions.get(session_id)

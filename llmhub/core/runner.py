@@ -26,6 +26,45 @@ from llmhub.core.template import ChatTemplateEngine
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
 from llmhub.utils.platform import get_hardware_profile
 
+_CLI_FLAGS_CACHE: Dict[str, Any] = {}
+
+def get_cli_supported_flags(cli_binary: str) -> Any:
+    """Inspect and cache supported command-line flags for the llama-cli executable."""
+    if cli_binary in _CLI_FLAGS_CACHE:
+        return _CLI_FLAGS_CACHE[cli_binary]
+
+    supported = set()
+    try:
+        import subprocess
+        import re
+        res = subprocess.run(
+            [cli_binary, "--help"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3.0,
+            check=False
+        )
+        help_text = (res.stdout or "") + " " + (res.stderr or "")
+        for flag in [
+            "-st", "--single-turn",
+            "--no-display-prompt",
+            "--log-disable",
+            "--no-warmup",
+            "-fa", "--flash-attn",
+            "-r", "--reverse-prompt",
+        ]:
+            escaped_flag = re.escape(flag)
+            if re.search(rf"(?:^|\s){escaped_flag}(?:\s|,|$)", help_text):
+                supported.add(flag)
+    except Exception:
+        supported.update(["-st", "--single-turn", "--no-display-prompt"])
+
+    _CLI_FLAGS_CACHE[cli_binary] = supported
+    return supported
+
 class ModelRunner:
     """Manages loading, inference, and streaming for a single GGUF model."""
 
@@ -76,7 +115,10 @@ class ModelRunner:
             )
         else:
             import shutil
-            self._cli_binary = shutil.which("llama-cli") or shutil.which("llama") or shutil.which("main")
+            cand = shutil.which("llama-cli") or shutil.which("llama")
+            if not cand and sys.platform != "win32":
+                cand = shutil.which("main")
+            self._cli_binary = cand
             if not self._cli_binary:
                 raise RuntimeError(
                     "Neither 'llama-cpp-python' nor native 'llama-cli' binary was found.\n"
@@ -139,6 +181,8 @@ class ModelRunner:
 
         if self.llm is None and getattr(self, "_cli_binary", None):
             import subprocess
+            import threading
+            flags = get_cli_supported_flags(self._cli_binary)
             cmd = [
                 self._cli_binary,
                 "-m", str(self.model_path),
@@ -148,28 +192,91 @@ class ModelRunner:
                 "--top-p", str(top_p),
                 "-t", str(self.n_threads),
                 "-c", str(self.n_ctx),
-                "--no-display-prompt"
             ]
+            if "-st" in flags:
+                cmd.append("-st")
+            elif "--single-turn" in flags:
+                cmd.append("--single-turn")
+            else:
+                cmd.append("-st")
+
+            no_display_prompt_active = False
+            if "--no-display-prompt" in flags:
+                cmd.append("--no-display-prompt")
+                no_display_prompt_active = True
+            if "--log-disable" in flags:
+                cmd.append("--log-disable")
+
+            has_reverse_prompt = ("-r" in flags) or ("--reverse-prompt" in flags)
+            if has_reverse_prompt and stop:
+                for s in stop:
+                    cmd.extend(["-r", s])
+
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1
             )
+            stderr_chunks: List[str] = []
+            def _drain_stderr() -> None:
+                try:
+                    if proc.stderr:
+                        for line in proc.stderr:
+                            stderr_chunks.append(line)
+                except Exception:
+                    pass
+            stderr_t = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_t.start()
+
             start_time = time.perf_counter()
             first_token_time = None
             ttft_ms = 0.0
             token_count = 0
+            accumulated_output = ""
+            hit_stop = False
             try:
-                # Fluid token/character-based chunk streaming
+                # Fluid token/character-based chunk streaming with prompt echo filtering
                 buffer = ""
-                while True:
+                initial_buffer = ""
+                prompt_stripped = not bool(prompt)
+                while not hit_stop:
                     char = proc.stdout.read(1)
                     if not char:
                         break
-                    buffer += char
+
+                    # Detect and strip prompt if llama-cli echoed it
+                    if not prompt_stripped:
+                        initial_buffer += char
+                        if len(initial_buffer) <= len(prompt):
+                            if initial_buffer == prompt[:len(initial_buffer)]:
+                                if len(initial_buffer) == len(prompt):
+                                    prompt_stripped = True
+                                continue
+                            else:
+                                prompt_stripped = True
+                                buffer = initial_buffer
+                                initial_buffer = ""
+                        else:
+                            prompt_stripped = True
+                            buffer = initial_buffer
+                            initial_buffer = ""
+                    else:
+                        buffer += char
+
+                    accumulated_output += char
+                    if stop:
+                        for s in stop:
+                            if s in accumulated_output:
+                                hit_stop = True
+                                break
+                    if hit_stop:
+                        break
+
                     if char in (" ", "\n", "\t") or len(buffer) >= 8:
                         token_count += 1
                         now = time.perf_counter()
@@ -187,6 +294,13 @@ class ModelRunner:
                             "done": False
                         }
                         buffer = ""
+
+                # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
+                if not prompt_stripped and initial_buffer:
+                    buffer = initial_buffer + buffer
+                    initial_buffer = ""
+                    prompt_stripped = True
+
                 # Yield remaining buffer if any
                 if buffer:
                     token_count += 1
@@ -205,11 +319,12 @@ class ModelRunner:
                         "done": False
                     }
             finally:
-                if proc.stdout:
-                    try:
-                        proc.stdout.close()
-                    except Exception:
-                        pass
+                for stream in (proc.stdout, proc.stderr):
+                    if stream:
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
                 if proc.poll() is None:
                     proc.terminate()
                     try:
@@ -222,10 +337,22 @@ class ModelRunner:
                         proc.wait(timeout=1.0)
                     except (subprocess.TimeoutExpired, Exception):
                         pass
+                stderr_t.join(timeout=1.0)
 
             total_elapsed = time.perf_counter() - start_time
             decode_duration = (total_elapsed - (ttft_ms / 1000.0)) if first_token_time else total_elapsed
             final_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
+
+            if proc.returncode is not None and proc.returncode != 0 and token_count == 0:
+                err_text = "".join(stderr_chunks).strip()
+                extra_hint = ""
+                if proc.returncode in (-9, 137, 9):
+                    extra_hint = " (Process terminated by SIGKILL, likely Android Low Memory Killer OOM)"
+                raise RuntimeError(
+                    f"Native llama-cli failed (exit code {proc.returncode}{extra_hint}).\n"
+                    f"Command: {' '.join(cmd)}\n"
+                    f"Details:\n{err_text or 'No stderr output returned.'}"
+                )
 
             yield {
                 "token": "",

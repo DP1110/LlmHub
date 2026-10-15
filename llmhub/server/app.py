@@ -586,6 +586,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=507, detail=str(e))
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Model engine initialization failed: {e}")
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
@@ -731,6 +733,8 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=507, detail=str(e))
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+        except RuntimeError as e:
+            raise HTTPException(status_code=503, detail=f"Model engine initialization failed: {e}")
 
         # 3. Render prompt from messages and validate bounds
         prompt = loaded_model.template_engine.render(sanitized_messages, add_generation_prompt=True)
