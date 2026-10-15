@@ -868,6 +868,20 @@
         "ends_with_stop_prefix prevents leaking <|im_end|> and </s> into yielded user text",
         "100% test pass rate across 175 tests in test suite"
       ]
+    },
+    {
+      "id": "US-068",
+      "title": "Termux Non-Root Web Chat Daemon & PID Management Hardening",
+      "phase": 11,
+      "description": "Fix AttributeError on HardwareDetector.is_non_root during on-demand model loading in llmhub serve, harden PIDManager against plain integer PID files, and ensure flawless web chat completions in Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Implement HardwareDetector.is_non_root classmethod returning True for unprivileged non-root execution",
+        "ModelManager dynamically disables mlock on Termux non-root without crashing",
+        "PIDManager cleanly parses and recovers from raw integer PID files without 'int' object has no attribute 'get' warning",
+        "POST /v1/chat/completions succeeds end-to-end on Termux web UI and API without HTTP 500 errors",
+        "100% test pass rate across all 181 tests in test suite"
+      ]
     }
   ]
 }

@@ -275,3 +275,26 @@ def test_model_manager_get_ps_matrix():
     assert "system_ram_free_mb" in ps
     assert "models" in ps
     assert isinstance(ps["models"], list)
+
+
+def test_model_manager_termux_non_root_mlock_disabled(mock_registry):
+    """Verify that Termux non-root environment disables mlock and succeeds without AttributeError."""
+    async def _run():
+        with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=create_mock_metadata()):
+            with patch.object(ModelManager, "get_free_ram_bytes", return_value=8 * 1024 * 1024 * 1024):
+                with patch("llmhub.hardware.detector.HardwareDetector.is_termux", return_value=True):
+                    with patch("llmhub.hardware.detector.HardwareDetector.is_root", return_value=False):
+                        backend = MockBackend()
+                        backend.load = MagicMock()
+                        mgr = ModelManager(
+                            registry=mock_registry,
+                            backend_factory=lambda: backend,
+                        )
+                        loaded = await mgr.load_model("termux-model", n_ctx=1024)
+                        assert loaded is not None
+                        backend.load.assert_called_once()
+                        _, kwargs = backend.load.call_args
+                        assert kwargs.get("use_mlock") is False
+                        assert kwargs.get("use_mmap") is True
+
+    asyncio.run(_run())

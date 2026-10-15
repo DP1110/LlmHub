@@ -322,3 +322,48 @@ def test_web_gui_and_logo_endpoints(client):
     assert client.get("/favicon.ico").status_code == 200
 
 
+@patch.object(state, "registry")
+def test_chat_completions_auto_loads_model_on_termux(mock_registry, client, tmp_path):
+    """Test that POST /v1/chat/completions auto-loads model in Termux unprivileged environment without 500 error."""
+    model_file = tmp_path / "termux-auto.gguf"
+    model_file.write_bytes(b"\x00" * 1024)
+
+    mock_record = MagicMock()
+    mock_record.tag = "termux-auto"
+    mock_record.file_path = str(model_file)
+    mock_registry.find_model.return_value = mock_record
+
+    # Ensure model is not currently resident
+    state.model_manager.loaded_models.pop("termux-auto", None)
+    old_factory = state.model_manager.backend_factory
+    state.model_manager.backend_factory = lambda: MockBackend()
+
+    mock_meta = MagicMock()
+    mock_meta.block_count = 16
+    mock_meta.head_count_kv = 4
+    mock_meta.head_dim = 64
+    mock_meta.chat_template = None
+    mock_meta.architecture = "llama"
+    mock_meta.model_name = "termux-auto"
+
+    try:
+        with patch.object(state.model_manager.registry, "find_model", return_value=mock_record):
+            with patch("llmhub.core.gguf_parser.GGUFParser.parse_file", return_value=mock_meta):
+                with patch("llmhub.hardware.detector.HardwareDetector.is_termux", return_value=True):
+                    with patch("llmhub.hardware.detector.HardwareDetector.is_root", return_value=False):
+                        payload = {
+                            "model": "termux-auto",
+                            "messages": [{"role": "user", "content": "Hello from Termux"}],
+                            "stream": False,
+                        }
+                        resp = client.post("/v1/chat/completions", json=payload)
+                        assert resp.status_code == 200
+                        data = resp.json()
+                        assert data["object"] == "chat.completion"
+                        assert data["choices"][0]["message"]["content"] == "Hello world"
+                        assert "termux-auto" in state.model_manager.loaded_models
+    finally:
+        state.model_manager.loaded_models.pop("termux-auto", None)
+        state.model_manager.backend_factory = old_factory
+
+

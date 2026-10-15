@@ -247,6 +247,62 @@ def test_pid_manager_detects_stale_lock(tmp_path):
     mgr.release()
 
 
+def test_pid_manager_handles_raw_integer_pid_file(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = run_dir / "llmhub.pid"
+
+    # Write a plain integer PID (non-JSON, or JSON integer like 679)
+    pid_file.write_text("999999\n", encoding="utf-8")
+
+    mgr = PIDManager(run_dir)
+    # read_pid_info must return {"pid": 999999}
+    info = mgr.read_pid_info()
+    assert info is not None
+    assert info.get("pid") == 999999
+
+    # Acquire must cleanly recover from stale plain-integer PID file without AttributeError
+    mgr.acquire(host="127.0.0.1", port=11434, version="0.9.0")
+    new_info = mgr.read_pid_info()
+    assert new_info["pid"] == os.getpid()
+    mgr.release()
+
+
+def test_pid_manager_handles_malformed_and_boolean_pid_files(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pid_file = run_dir / "llmhub.pid"
+    mgr = PIDManager(run_dir)
+
+    # 1. JSON boolean true must NOT be treated as integer PID 1 (CR-01)
+    pid_file.write_text("true\n", encoding="utf-8")
+    assert mgr.read_pid_info() is None
+
+    # 2. Negative integer must NOT be treated as valid PID
+    pid_file.write_text("-500\n", encoding="utf-8")
+    assert mgr.read_pid_info() is None
+
+    # 3. Malformed JSON with boolean pid
+    pid_file.write_text(json.dumps({"pid": True}), encoding="utf-8")
+    assert mgr.read_pid_info() is None
+
+    # 4. Malformed JSON with non-numeric string pid
+    pid_file.write_text(json.dumps({"pid": "invalid_pid"}), encoding="utf-8")
+    assert mgr.read_pid_info() is None
+
+    # 5. Numeric string pid is normalized to int
+    pid_file.write_text(json.dumps({"pid": "8888"}), encoding="utf-8")
+    info = mgr.read_pid_info()
+    assert info is not None
+    assert info["pid"] == 8888
+
+    # 6. Acquire cleanly recovers from corrupt file without crashing
+    pid_file.write_text("true\n", encoding="utf-8")
+    mgr.acquire(host="127.0.0.1", port=11434, version="0.9.0")
+    assert mgr.read_pid_info()["pid"] == os.getpid()
+    mgr.release()
+
+
 def test_pid_manager_prevents_duplicate_server(tmp_path):
     run_dir = tmp_path / "run"
     mgr = PIDManager(run_dir)

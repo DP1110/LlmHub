@@ -61,6 +61,11 @@ class HardwareDetector:
             return False
 
     @classmethod
+    def is_non_root(cls) -> bool:
+        """Return True if executing as an unprivileged non-root user."""
+        return not cls.is_root()
+
+    @classmethod
     def detect_simd(cls) -> List[str]:
         """Detect CPU vector extensions."""
         simd = []

@@ -27,7 +27,7 @@ class ServerAlreadyRunningError(Exception):
 
 def is_process_alive(pid: int) -> bool:
     """Check if process with given PID is currently active across platforms."""
-    if pid <= 0:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
 
     # 1. Try psutil first if available
@@ -74,6 +74,13 @@ def is_llmhub_process(pid: int) -> bool:
     try:
         import psutil
         proc = psutil.Process(pid)
+        # On Android Termux, check if UID matches our user to rule out foreign system daemons
+        if hasattr(os, "getuid"):
+            try:
+                if proc.uids().real != os.getuid():
+                    return False
+            except Exception:
+                pass
         cmd = " ".join(proc.cmdline()).lower()
         if "python" in cmd or "llmhub" in cmd:
             return True
@@ -91,12 +98,31 @@ class PIDManager:
         self.pid_file = self.run_dir / "llmhub.pid"
 
     def read_pid_info(self) -> Optional[Dict[str, Any]]:
-        """Read existing PID file data if present."""
+        """Read existing PID file data if present, supporting both JSON and plain-integer PID files."""
         if not self.pid_file.exists():
             return None
         try:
             with open(self.pid_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return None
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        pid_val = data.get("pid")
+                        if isinstance(pid_val, int) and not isinstance(pid_val, bool) and pid_val > 0:
+                            return data
+                        elif isinstance(pid_val, str) and pid_val.isdigit() and int(pid_val) > 0:
+                            data["pid"] = int(pid_val)
+                            return data
+                        return None
+                    elif type(data) is int and data > 0:
+                        return {"pid": data}
+                except Exception:
+                    pass
+                if content.isdigit() and int(content) > 0:
+                    return {"pid": int(content)}
+                return None
         except Exception as e:
             logger.warning("Corrupt PID file at %s: %s", self.pid_file, e)
             return None
@@ -109,13 +135,13 @@ class PIDManager:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         existing = self.read_pid_info()
 
-        if existing:
+        if existing and isinstance(existing, dict):
             old_pid = existing.get("pid")
             if old_pid and is_llmhub_process(old_pid) and old_pid != os.getpid():
                 raise ServerAlreadyRunningError(
                     f"LLMHub server is already running with PID {old_pid} "
-                    f"listening on {existing.get('host')}:{existing.get('port')} "
-                    f"(started at {existing.get('started_at')})."
+                    f"listening on {existing.get('host', 'unknown')}:{existing.get('port', 'unknown')} "
+                    f"(started at {existing.get('started_at', 'unknown')})."
                 )
             else:
                 # Process is dead or recycled; previous instance crashed without cleaning up
@@ -155,9 +181,13 @@ class PIDManager:
         try:
             if self.pid_file.exists():
                 info = self.read_pid_info()
-                if force or (info and info.get("pid") == os.getpid()):
-                    self.pid_file.unlink()
-                    logger.info("Removed PID file %s for PID %d", self.pid_file, os.getpid())
+                target_pid = info.get("pid") if (info and isinstance(info, dict)) else None
+                if force or (target_pid == os.getpid()):
+                    try:
+                        self.pid_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    logger.info("Removed PID file %s for PID %s", self.pid_file, target_pid or os.getpid())
         except Exception as e:
             logger.warning("Failed to remove PID file %s: %s", self.pid_file, e)
 
