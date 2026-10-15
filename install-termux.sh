@@ -54,14 +54,15 @@ if command -v pkg >/dev/null 2>&1; then
         cmake \
         make \
         git \
+        libc++ \
         libopenblas \
         termux-tools \
         binutils || {
         echo -e "${RED}[ERROR] Failed to install essential packages via pkg.${NC}"
         exit 1
     }
-    # Attempt to install native llama-cpp package if available in Termux repositories
-    pkg install -y llama-cpp 2>/dev/null || true
+    # Ensure libc++ and llama-cpp are up to date to prevent NDK symbol mismatches
+    pkg install -y libc++ llama-cpp 2>/dev/null || true
 elif command -v apt-get >/dev/null 2>&1; then
     apt-get install -y \
         python3 \
@@ -130,24 +131,51 @@ mkdir -p "$HOME/.llmhub/run"
 
 # Verify or compile native llama.cpp ARM64 runtime
 echo -e "\n${BOLD}[4.5/5] Checking native llama.cpp ARM64 binary...${NC}"
+
+is_binary_runnable() {
+    local bin="$1"
+    [ -n "$bin" ] && [ -x "$bin" ] && "$bin" --version >/dev/null 2>&1
+}
+
 LLAMA_BIN=""
 for cand in "llama-cli" "llama" "llama-run" "llama-completion"; do
     if command -v "$cand" >/dev/null 2>&1; then
-        LLAMA_BIN="$(command -v "$cand")"
-        break
-    elif [ -f "${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand" ]; then
-        LLAMA_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand"
-        break
-    elif [ -f "$HOME/llama.cpp/build/bin/$cand" ]; then
-        LLAMA_BIN="$HOME/llama.cpp/build/bin/$cand"
-        break
+        cand_path="$(command -v "$cand")"
+        if is_binary_runnable "$cand_path"; then
+            LLAMA_BIN="$cand_path"
+            break
+        fi
+    fi
+    if [ -f "$HOME/llama.cpp/build/bin/$cand" ]; then
+        if is_binary_runnable "$HOME/llama.cpp/build/bin/$cand"; then
+            LLAMA_BIN="$HOME/llama.cpp/build/bin/$cand"
+            break
+        fi
+    fi
+    if [ -f "${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand" ]; then
+        cand_path="${PREFIX:-/data/data/com.termux/files/usr}/bin/$cand"
+        if is_binary_runnable "$cand_path"; then
+            LLAMA_BIN="$cand_path"
+            break
+        fi
     fi
 done
 
+# If binary is present in PREFIX/bin but failed execution due to dynamic linking (ABI symbol mismatch)
+if [ -z "$LLAMA_BIN" ] && [ -x "${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli" ]; then
+    echo -e "${YELLOW}[!] Package binary at ${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli failed link verification.${NC}"
+    echo -e "    Attempting automatic fix by upgrading Termux libc++ package..."
+    pkg install -y libc++ 2>/dev/null || true
+    if is_binary_runnable "${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli"; then
+        LLAMA_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli"
+        echo -e "${GREEN}[+] Successfully resolved dynamic linking issue for llama-cli!${NC}"
+    fi
+fi
+
 if [ -n "$LLAMA_BIN" ]; then
-    echo -e "${GREEN}[+] Detected native llama.cpp binary: ${LLAMA_BIN}${NC}"
+    echo -e "${GREEN}[+] Verified working native llama.cpp binary: ${LLAMA_BIN}${NC}"
 else
-    echo -e "${YELLOW}[!] llama-cli not found in system packages. Building latest llama.cpp natively...${NC}"
+    echo -e "${YELLOW}[!] Working llama-cli not found in system packages. Building latest llama.cpp natively...${NC}"
     mkdir -p "$HOME"
     if [ ! -d "$HOME/llama.cpp" ]; then
         echo -e "Cloning latest llama.cpp..."

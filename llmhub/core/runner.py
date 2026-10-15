@@ -128,38 +128,62 @@ class ModelRunner:
         else:
             import os
             import shutil
-            cand = (
-                shutil.which("llama-cli")
-                or shutil.which("llama")
-                or shutil.which("llama-run")
-                or shutil.which("llama-completion")
-            )
-            if not cand and sys.platform != "win32":
-                cand = shutil.which("main")
-            if not cand:
-                bin_name = "llama-cli.exe" if sys.platform == "win32" else "llama-cli"
-                main_name = "main.exe" if sys.platform == "win32" else "main"
-                for p in [
-                    Path.home() / "llama.cpp" / "build" / "bin" / bin_name,
-                    Path.home() / "llama.cpp" / "build" / "bin" / "Release" / bin_name,
-                    Path.home() / "llama.cpp" / "build" / "bin" / main_name,
-                    Path("/opt/homebrew/bin/llama-cli"),
-                    Path("/usr/local/bin/llama-cli"),
-                    Path("/data/data/com.termux/files/usr/bin/llama-cli"),
-                    Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
-                ]:
-                    if p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK)):
-                        cand = str(p)
-                        break
-            self._cli_binary = cand
+            import subprocess
+
+            candidates = []
+            for name in ["llama-cli", "llama", "llama-run", "llama-completion"]:
+                w = shutil.which(name)
+                if w and w not in candidates:
+                    candidates.append(w)
+            if sys.platform != "win32":
+                w = shutil.which("main")
+                if w and w not in candidates:
+                    candidates.append(w)
+
+            bin_name = "llama-cli.exe" if sys.platform == "win32" else "llama-cli"
+            main_name = "main.exe" if sys.platform == "win32" else "main"
+            for p in [
+                Path.home() / "llama.cpp" / "build" / "bin" / bin_name,
+                Path.home() / "llama.cpp" / "build" / "bin" / "Release" / bin_name,
+                Path.home() / "llama.cpp" / "build" / "bin" / main_name,
+                Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
+                Path("/opt/homebrew/bin/llama-cli"),
+                Path("/usr/local/bin/llama-cli"),
+                Path("/data/data/com.termux/files/usr/bin/llama-cli"),
+            ]:
+                if p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK)):
+                    sp = str(p)
+                    if sp not in candidates:
+                        candidates.append(sp)
+
+            def is_runnable(path: str) -> bool:
+                try:
+                    res = subprocess.run(
+                        [path, "--version"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=2.0
+                    )
+                    return res.returncode == 0
+                except Exception:
+                    return False
+
+            # Prioritize a candidate that is actively runnable without dynamic linker errors
+            chosen = None
+            for c in candidates:
+                if is_runnable(c):
+                    chosen = c
+                    break
+
+            # Fallback to first available candidate if none actively runnable (e.g. mocked in tests)
+            self._cli_binary = chosen or (candidates[0] if candidates else None)
             if not self._cli_binary:
                 raise RuntimeError(
                     "Neither 'llama-cpp-python' nor native 'llama-cli' binary was found.\n"
                     "To enable model inference in Termux, install native llama.cpp with:\n"
-                    "  pkg install llama-cpp\n"
+                    "  pkg install libc++ llama-cpp\n"
                     "Or compile it directly with:\n"
-                    "  pkg install git cmake clang make -y\n"
-                    "  git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp && cmake -B build && cmake --build build -j4"
+                    "  bash install-termux.sh"
                 )
 
     def close(self) -> None:
@@ -423,6 +447,14 @@ class ModelRunner:
                 extra_hint = ""
                 if rc in (-9, 137, 9):
                     extra_hint = " (Process terminated by SIGKILL, likely Android Low Memory Killer OOM)"
+                elif "cannot locate symbol" in err_text or "CANNOT LINK EXECUTABLE" in err_text:
+                    extra_hint = (
+                        " (Android dynamic linker ABI mismatch: outdated Termux libc++)\n"
+                        "To fix this immediately, run in Termux:\n"
+                        "  pkg install -y libc++\n"
+                        "Or re-run the installer to compile from source:\n"
+                        "  bash install-termux.sh"
+                    )
                 raise RuntimeError(
                     f"Native llama-cli failed (exit code {rc}{extra_hint}).\n"
                     f"Tokens yielded before crash: {token_count}\n"

@@ -665,6 +665,43 @@ def test_llamacpp_backend_cli_error_surfacing(tmp_path: Path, monkeypatch: pytes
                 backend.decode_step("sess-fail", n_tokens=1)
 
 
+def test_runner_cli_dynamic_linker_symbol_error_guidance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure dynamic linker ABI symbol errors provide actionable libc++ fix guidance."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_linker.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("")
+            mock_proc.stderr = io.StringIO(
+                'CANNOT LINK EXECUTABLE "/data/data/com.termux/files/usr/bin/llama-cli": '
+                'cannot locate symbol "_ZNSt6__ndk113__hash_memoryEPKvm" referenced by "/data/data/com.termux/files/usr/lib/libllama-server-impl.so"...\n'
+            )
+            mock_proc.poll.return_value = 1
+            mock_proc.returncode = 1
+            mock_popen.return_value = mock_proc
+
+            with pytest.raises(RuntimeError) as exc_info:
+                list(runner.stream_completion(prompt="Hello"))
+
+            err_msg = str(exc_info.value)
+            assert "pkg install -y libc++" in err_msg
+            assert "cannot locate symbol" in err_msg
+
+
+
 def test_runner_cli_partial_prompt_match_at_eof(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure partial prompt prefix match at EOF is flushed and not lost."""
     from llmhub.core.runner import ModelRunner
