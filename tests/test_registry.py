@@ -94,3 +94,67 @@ def test_scan_and_register_local_models(tmp_path: Path):
     scanned_again = reg.scan_and_register_local_models(models_dir)
     assert len(scanned_again) == 0
     assert len(reg.list_models()) == 1
+
+
+def test_registry_alias_lookup(tmp_path: Path):
+    db_file = tmp_path / "registry.db"
+    reg = ModelRegistry(db_file)
+    rec = reg.register_model(
+        org="bartowski",
+        name="SmolLM2-135M-Instruct-GGUF",
+        quant="q4_k_m",
+        file_path=tmp_path / "model.gguf",
+        manifest_path=tmp_path / "manifest.json",
+        size_bytes=100000000,
+        sha256="",
+        architecture="llama",
+        n_layers=16,
+        n_kv_heads=4,
+        head_dim=64,
+        ctx_max=8192
+    )
+
+    # Shorthand alias lookups
+    found = reg.find_model("smollm2:135m")
+    assert found is not None
+    assert found.id == rec.id
+
+    found_base = reg.find_model("smollm2")
+    assert found_base is not None
+    assert found_base.id == rec.id
+
+    found_hyphen = reg.find_model("smollm2-135m")
+    assert found_hyphen is not None
+    assert found_hyphen.id == rec.id
+
+
+def test_registry_alias_lookup_with_non_default_quant(tmp_path: Path):
+    db_file = tmp_path / "registry.db"
+    reg = ModelRegistry(db_file)
+    rec = reg.register_model(
+        org="bartowski",
+        name="SmolLM2-135M-Instruct-GGUF",
+        quant="q8_0",
+        file_path=tmp_path / "model.gguf",
+        manifest_path=tmp_path / "manifest.json",
+        size_bytes=150000000,
+        sha256="",
+        architecture="llama",
+        n_layers=16,
+        n_kv_heads=4,
+        head_dim=64,
+        ctx_max=8192
+    )
+
+    # Shorthand alias lookup with default quant must find the installed q8_0 model
+    found = reg.find_model("smollm2:135m")
+    assert found is not None
+    assert found.id == rec.id
+    assert found.quant == "q8_0"
+
+    # Base alias lookup must also find it
+    found_base = reg.find_model("smollm2")
+    assert found_base is not None
+    assert found_base.id == rec.id
+
+

@@ -47,7 +47,7 @@ def cmd_list(args: argparse.Namespace) -> None:
         models = client.list_models()
         if not models:
             print("No models found in local storage.")
-            print("Pull a model with: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m")
+            print("Pull a model with: llmhub pull smollm2:135m  (or: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m)")
             return
 
         print(f"\n{'TAG':<45} {'ARCH':<10} {'QUANT':<10} {'SIZE':<10} {'MAX CTX':<10}")
@@ -59,10 +59,14 @@ def cmd_list(args: argparse.Namespace) -> None:
         print()
     else:
         registry = ModelRegistry(config.db_path)
+        try:
+            registry.scan_and_register_local_models(config.models_dir)
+        except Exception:
+            pass
         records = registry.list_models()
         if not records:
             print("No models found in local storage.")
-            print("Pull a model with: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m")
+            print("Pull a model with: llmhub pull smollm2:135m  (or: llmhub pull Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m)")
             return
 
         print(f"\n{'TAG':<45} {'ARCH':<10} {'QUANT':<10} {'SIZE':<10} {'MAX CTX':<10}")
@@ -78,7 +82,7 @@ def cmd_show(args: argparse.Namespace) -> None:
     record = registry.find_model(args.model)
 
     if not record:
-        sys.stderr.write(f"[ERROR] Model '{args.model}' not found in registry. Run 'llmhub list' to see available models.\n")
+        sys.stderr.write(f"[ERROR] Model '{args.model}' not found in registry. Run 'llmhub list' or 'llmhub models' to see available models.\n")
         sys.exit(1)
 
     model_path = Path(record.file_path)
@@ -852,7 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_unpin.set_defaults(func=cmd_unpin)
 
     # list
-    p_list = subparsers.add_parser("list", help="List all locally installed models")
+    p_list = subparsers.add_parser("list", aliases=["models", "ls"], help="List all locally installed models")
     p_list.set_defaults(func=cmd_list)
 
     # show

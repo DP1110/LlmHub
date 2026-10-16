@@ -14,6 +14,7 @@ from typing import Callable, Dict, Optional, Tuple
 import httpx
 
 from llmhub.config import LLMHubConfig
+from llmhub.core.aliases import MODEL_ALIASES, resolve_model_alias
 from llmhub.core.gguf_parser import GGUFParser
 from llmhub.core.registry import ModelRegistry, ModelRecord
 
@@ -32,13 +33,17 @@ class HFDownloader:
         """Parse model spec into (org, name, quant, filename).
         
         Formats supported:
-        1. "Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m"
-        2. "Qwen/Qwen2.5-0.5B-Instruct-GGUF:qwen2.5-0.5b-instruct-q4_k_m.gguf"
-        3. "bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M"
+        1. Shorthand aliases: "smollm2:135m", "qwen2.5:0.5b", "llama3.2:1b"
+        2. Alias with custom quant: "smollm2:135m:q8_0"
+        3. Full repo spec: "Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m"
+        4. Specific filename: "bartowski/Llama-3.2-1B-Instruct-GGUF:Llama-3.2-1B-Instruct-Q4_K_M.gguf"
         """
-        spec = spec.strip()
+        spec = resolve_model_alias(spec)
         if "/" not in spec:
-            raise DownloadError(f"Model spec must include repository org/name, e.g. 'Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m'. Got: {spec}")
+            raise DownloadError(
+                f"Model spec must include repository org/name (e.g. 'Qwen/Qwen2.5-0.5B-Instruct-GGUF:q4_k_m') "
+                f"or a recognized alias (e.g. 'smollm2:135m', 'qwen2.5:0.5b', 'llama3.2:1b'). Got: {spec}"
+            )
 
         org_repo, quant_or_file = spec.split(":", 1) if ":" in spec else (spec, "q4_k_m")
         org, repo = org_repo.split("/", 1)
@@ -50,6 +55,9 @@ class HFDownloader:
             base = quant_or_file[:-5]
             extracted = base.split("-")[-1] if "-" in base else "default"
             quant = extracted.lower()
+        elif not quant_or_file or quant_or_file.lower() == "latest":
+            quant = "q4_k_m"
+            filename = None
         else:
             quant = quant_or_file.lower()
             filename = None
@@ -134,11 +142,56 @@ class HFDownloader:
         manifest_path = target_dir / "manifest.json"
 
         # Check if already fully downloaded
-        if model_path.exists():
+        if model_path.exists() and model_path.stat().st_size > 0:
             existing_record = self.registry.find_model(f"{org}/{repo}:{quant}")
             if existing_record:
                 sys.stdout.write(f"Model {org}/{repo}:{quant} is already downloaded and registered.\n")
                 return existing_record
+            elif expected_size is None or model_path.stat().st_size == expected_size:
+                sys.stdout.write(f"Found existing model on disk at {model_path}. Registering in local registry...\n")
+                try:
+                    metadata = GGUFParser.parse_file(model_path)
+                    from llmhub.hardware.detector import HardwareDetector
+                    from llmhub.hardware.manifest import ModelManifest
+                    from llmhub.hardware.tuner import AutoTuner
+
+                    prof = HardwareDetector.get_profile()
+                    threads, _ = AutoTuner.select_threads(prof)
+                    rec_ctx, _, _ = AutoTuner.calculate_safe_context(
+                        weights_bytes=model_path.stat().st_size,
+                        n_layers=metadata.block_count,
+                        n_kv_heads=metadata.head_count_kv,
+                        head_dim=metadata.head_dim,
+                        ctx_max=metadata.context_length,
+                        free_ram_bytes=prof.free_ram_bytes
+                    )
+                    manifest = ModelManifest.create_from_gguf(
+                        org=org,
+                        name=repo,
+                        quant=quant,
+                        file_path=model_path,
+                        sha256="",
+                        metadata=metadata,
+                        recommended_threads=threads,
+                        recommended_ctx=rec_ctx
+                    )
+                    manifest.save(manifest_path)
+                    return self.registry.register_model(
+                        org=org,
+                        name=repo,
+                        quant=quant,
+                        file_path=model_path,
+                        manifest_path=manifest_path,
+                        size_bytes=model_path.stat().st_size,
+                        sha256="",
+                        architecture=metadata.architecture or "llama",
+                        n_layers=metadata.block_count or 0,
+                        n_kv_heads=metadata.head_count_kv or 0,
+                        head_dim=metadata.head_dim or 0,
+                        ctx_max=metadata.context_length or 2048,
+                    )
+                except Exception:
+                    pass
 
         # Check resume offset
         existing_bytes = tmp_path.stat().st_size if tmp_path.exists() else 0
@@ -204,6 +257,11 @@ class HFDownloader:
         digest = sha256_hash.hexdigest()
 
         if expected_sha and digest.lower() != expected_sha.lower():
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
             raise DownloadError(
                 f"SHA-256 integrity check failed!\n"
                 f"Expected: {expected_sha.lower()}\n"
@@ -221,15 +279,15 @@ class HFDownloader:
         from llmhub.hardware.manifest import ModelManifest
         from llmhub.hardware.tuner import AutoTuner
 
-        threads, _ = AutoTuner.select_threads()
-        actual_free_ram = HardwareDetector.get_profile().free_ram_bytes
+        prof = HardwareDetector.get_profile()
+        threads, _ = AutoTuner.select_threads(prof)
         rec_ctx, _, _ = AutoTuner.calculate_safe_context(
             weights_bytes=model_path.stat().st_size,
             n_layers=metadata.block_count,
             n_kv_heads=metadata.head_count_kv,
             head_dim=metadata.head_dim,
             ctx_max=metadata.context_length,
-            free_ram_bytes=actual_free_ram
+            free_ram_bytes=prof.free_ram_bytes
         )
         manifest = ModelManifest.create_from_gguf(
             org=org,

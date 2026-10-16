@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from llmhub.core.aliases import resolve_model_alias
+
 class ModelRecord:
     def __init__(
         self,
@@ -118,7 +120,7 @@ class ModelRegistry:
                 UNIQUE(org, name, quant)
             );
             """)
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_models_lookup ON models(org, name, quant);")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_models_lookup ON models(org COLLATE NOCASE, name COLLATE NOCASE, quant COLLATE NOCASE);")
             conn.commit()
 
     def register_model(
@@ -174,52 +176,72 @@ class ModelRegistry:
             return [self._row_to_record(row) for row in rows]
 
     def find_model(self, model_spec: str) -> Optional[ModelRecord]:
-        """Find a model by tag: 'org/name:quant', 'name:quant', or 'name'."""
+        """Find a model by tag: 'org/name:quant', 'name:quant', 'name', or alias."""
         spec = model_spec.strip()
-        org = None
-        name = spec
-        quant = None
-
-        if "/" in spec:
-            parts = spec.split("/", 1)
-            org = parts[0]
-            rest = parts[1]
-        else:
-            rest = spec
-
-        if ":" in rest:
-            name, quant = rest.split(":", 1)
-            quant = quant.lower()
-        else:
-            name = rest
+        candidates_specs = [spec]
+        resolved = resolve_model_alias(spec)
+        if resolved != spec:
+            candidates_specs.append(resolved)
 
         with self._get_connection() as conn:
-            if org and quant:
-                row = conn.execute(
-                    "SELECT * FROM models WHERE org=? AND name=? AND quant=?",
-                    (org, name, quant)
-                ).fetchone()
-            elif org and not quant:
-                row = conn.execute(
-                    "SELECT * FROM models WHERE org=? AND name=? ORDER BY id DESC LIMIT 1",
-                    (org, name)
-                ).fetchone()
-            elif quant and not org:
-                row = conn.execute(
-                    "SELECT * FROM models WHERE name=? AND quant=? ORDER BY id DESC LIMIT 1",
-                    (name, quant)
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT * FROM models WHERE name=? ORDER BY id DESC LIMIT 1",
-                    (name,)
-                ).fetchone()
+            for s in candidates_specs:
+                org = None
+                name = s
+                quant = None
 
-            if row:
-                return self._row_to_record(row)
+                if "/" in s:
+                    parts = s.split("/", 1)
+                    org = parts[0]
+                    rest = parts[1]
+                else:
+                    rest = s
+
+                if ":" in rest:
+                    name, quant = rest.split(":", 1)
+                    quant = quant.lower()
+                else:
+                    name = rest
+
+                if org and quant:
+                    row = conn.execute(
+                        "SELECT * FROM models WHERE org=? COLLATE NOCASE AND name=? COLLATE NOCASE AND quant=? COLLATE NOCASE",
+                        (org, name, quant)
+                    ).fetchone()
+                elif org and not quant:
+                    row = conn.execute(
+                        "SELECT * FROM models WHERE org=? COLLATE NOCASE AND name=? COLLATE NOCASE ORDER BY id DESC LIMIT 1",
+                        (org, name)
+                    ).fetchone()
+                elif quant and not org:
+                    row = conn.execute(
+                        "SELECT * FROM models WHERE name=? COLLATE NOCASE AND quant=? COLLATE NOCASE ORDER BY id DESC LIMIT 1",
+                        (name, quant)
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        "SELECT * FROM models WHERE name=? COLLATE NOCASE ORDER BY id DESC LIMIT 1",
+                        (name,)
+                    ).fetchone()
+
+                if row:
+                    return self._row_to_record(row)
+
+            # Fallback 0: If alias resolved to a canonical repo org/name but requested quant
+            # is not installed (e.g. user pulled custom quant like q8_0), match any installed quant
+            if resolved != spec and "/" in resolved:
+                r_org_repo = resolved.split(":", 1)[0]
+                if "/" in r_org_repo:
+                    r_org, r_name = r_org_repo.split("/", 1)
+                    row = conn.execute(
+                        "SELECT * FROM models WHERE org=? COLLATE NOCASE AND name=? COLLATE NOCASE ORDER BY id DESC LIMIT 1",
+                        (r_org, r_name)
+                    ).fetchone()
+                    if row:
+                        return self._row_to_record(row)
 
             # Fallback 1: Case-insensitive match across registered tags and names
             clean_spec = spec.lower().replace(":", "-").replace("/", "-").replace("\\", "-").replace("_", "-")
+            clean_resolved = resolved.lower().replace(":", "-").replace("/", "-").replace("\\", "-").replace("_", "-")
             all_rows = conn.execute("SELECT * FROM models ORDER BY id DESC").fetchall()
             for r in all_rows:
                 tag = f"{r['org']}/{r['name']}:{r['quant']}".lower()
@@ -235,7 +257,12 @@ class ModelRegistry:
                     tag_short.replace(":", "-").replace("_", "-"),
                     stem_name.replace(":", "-").replace("_", "-"),
                 ]
-                if spec.lower() in candidates or clean_spec in candidates:
+                if (
+                    spec.lower() in candidates
+                    or clean_spec in candidates
+                    or resolved.lower() in candidates
+                    or clean_resolved in candidates
+                ):
                     return self._row_to_record(r)
 
         # Fallback 2: Check if spec points directly to an existing GGUF file
@@ -315,12 +342,26 @@ class ModelRegistry:
                     org = rel[0]
                     name = rel[1]
                     file_stem = Path(rel[2]).stem.lower()
-                    if any(q in file_stem for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
+                    parts = file_stem.replace(":", "-").replace("_", "-").split("-")
+                    last_part = parts[-1]
+                    if any(q in last_part for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
+                        quant = last_part
+                    elif any(q in file_stem for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
                         quant = file_stem
                     else:
                         quant = "gguf"
+                elif len(rel) == 2:
+                    org = "local"
+                    name = rel[0]
+                    file_stem = Path(rel[1]).stem.lower()
+                    parts = file_stem.replace(":", "-").replace("_", "-").split("-")
+                    last_part = parts[-1]
+                    if any(q in last_part for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
+                        quant = last_part
+                    else:
+                        quant = "gguf"
                 elif "-" in stem or "_" in stem or ":" in stem:
-                    parts = stem.replace(":", "-").split("-")
+                    parts = stem.replace(":", "-").replace("_", "-").split("-")
                     last_part = parts[-1].lower()
                     if any(q in last_part for q in ["q4", "q5", "q8", "f16", "f32", "q2", "q3", "q6"]):
                         quant = last_part

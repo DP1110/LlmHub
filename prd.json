@@ -915,6 +915,21 @@
         "Web UI gracefully handles empty streams with user-friendly diagnostics",
         "100% test pass rate across all 196 tests in test suite"
       ]
+    },
+    {
+      "id": "US-071",
+      "title": "CLI Aliases ('models', 'ls') and Shorthand Model Pulling Registry for SmolLM2 & Qwen",
+      "phase": 11,
+      "description": "Support 'llmhub models' and 'llmhub ls' as first-class CLI aliases for 'llmhub list' with offline auto-discovery, and implement intuitive shorthand model aliases (e.g. 'smollm2:135m', 'qwen2.5:0.5b', 'llama3.2:1b') in HFDownloader and ModelRegistry to allow single-command model pulling and serving on mobile/Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Register 'models' and 'ls' as first-class aliases for 'llmhub list' in argparse CLI dispatcher",
+        "cmd_list auto-scans ~/.llmhub/models even when server is offline to auto-register locally present GGUF models",
+        "HFDownloader.parse_spec and resolve_model_alias expand shorthand tags (smollm2:135m, smollm2:360m, qwen2.5:0.5b, llama3.2:1b, etc.) into canonical Hugging Face GGUF repositories",
+        "HFDownloader supports custom quantization suffixes on aliases (e.g. smollm2:135m:q8_0)",
+        "ModelRegistry.find_model resolves shorthand model aliases for local model loading across CLI and server",
+        "100% test pass rate across all 204 tests in test suite"
+      ]
     }
   ]
 }

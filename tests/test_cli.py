@@ -51,3 +51,19 @@ def test_cli_list_empty(capsys):
     args.func(args)
     captured = capsys.readouterr()
     assert "No models found" in captured.out or "TAG" in captured.out
+
+def test_cli_models_and_ls_aliases(capsys):
+    parser = build_parser()
+    
+    args_models = parser.parse_args(["models"])
+    assert args_models.func == cmd_list
+    args_models.func(args_models)
+    captured = capsys.readouterr()
+    assert "No models found" in captured.out or "TAG" in captured.out
+
+    args_ls = parser.parse_args(["ls"])
+    assert args_ls.func == cmd_list
+    args_ls.func(args_ls)
+    captured = capsys.readouterr()
+    assert "No models found" in captured.out or "TAG" in captured.out
+
