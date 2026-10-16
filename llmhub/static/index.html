@@ -1326,6 +1326,7 @@
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
+        let serverErrorMessage = '';
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1344,7 +1345,7 @@
             try {
               const parsed = JSON.parse(dataStr);
               if (parsed.error) {
-                contentElem.textContent += `\n[Server Error]: ${parsed.error}`;
+                serverErrorMessage = parsed.error;
                 break;
               }
               const delta = parsed.choices?.[0]?.delta?.content || '';
@@ -1373,27 +1374,42 @@
             if (dataStr && dataStr !== '[DONE]') {
               try {
                 const parsed = JSON.parse(dataStr);
-                const delta = parsed.choices?.[0]?.delta?.content || '';
-                if (delta) {
-                  streamedText += delta;
-                  contentElem.textContent = streamedText;
+                if (parsed.error) {
+                  serverErrorMessage = parsed.error;
+                } else {
+                  const delta = parsed.choices?.[0]?.delta?.content || '';
+                  if (delta) {
+                    streamedText += delta;
+                    contentElem.textContent = streamedText;
+                  }
                 }
               } catch (e) {}
             }
           } else if (!streamedText) {
             try {
               const parsed = JSON.parse(cleanBuf);
-              const content = parsed.choices?.[0]?.message?.content;
-              if (content) streamedText = content;
-              contentElem.textContent = streamedText;
+              if (parsed.error) {
+                serverErrorMessage = parsed.error;
+              } else {
+                const content = parsed.choices?.[0]?.message?.content;
+                if (content) streamedText = content;
+                contentElem.textContent = streamedText;
+              }
             } catch (e) {}
           }
         }
 
-        if (!streamedText) {
+        if (serverErrorMessage) {
+          contentElem.innerHTML = `
+            <div style="background:rgba(239, 68, 68, 0.1); border:1px solid rgba(239, 68, 68, 0.3); border-radius:8px; padding:12px; color:#f87171; font-size:0.875rem; line-height:1.4;">
+              <div style="font-weight:600; margin-bottom:4px;">❌ Runtime Engine Error</div>
+              <div style="font-family:monospace; font-size:0.8rem; white-space:pre-wrap; word-break:break-word;">${escapeHtml(serverErrorMessage)}</div>
+            </div>
+          `;
+        } else if (!streamedText) {
           contentElem.innerHTML = `
             <div style="color:var(--text-muted); font-size:0.85rem; font-style:italic;">
-              (No response tokens received from model runtime. If running in Termux, check server terminal output or re-run <code>bash install-termux.sh</code> to ensure native llama-completion binary is linked.)
+              (No response tokens received from model runtime. If running in Termux, check server terminal output or run <code>llmhub termux</code> for hardware diagnostics.)
             </div>
           `;
         }

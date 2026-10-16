@@ -60,14 +60,13 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
         pass
 
     # Universal default fallback if flags couldn't be discovered (e.g. timeout or minimal mock)
+    is_cli = "llama-cli" in cli_binary.lower() or "llama-run" in cli_binary.lower()
     default_flags = {
-        "-st", "--single-turn",
-        "-no-cnv", "--no-conversation",
-        "--no-display-prompt",
-        "--log-disable",
-        "--special",
-        "-r", "--reverse-prompt"
+        "-m", "-p", "-f", "-c", "-t", "-n", "--temp",
+        "--log-disable", "--special", "-r", "--reverse-prompt"
     }
+    if is_cli:
+        default_flags.update({"-st", "--single-turn", "-no-cnv", "--no-conversation", "--no-display-prompt"})
     if not supported:
         supported.update(default_flags)
 
@@ -178,12 +177,17 @@ class ModelRunner:
             def is_runnable(path: str) -> bool:
                 try:
                     res = subprocess.run(
-                        [path, "--version"],
+                        [path, "-h"],
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        timeout=2.0
+                        timeout=3.0
                     )
-                    return res.returncode == 0
+                    out = (res.stdout or b"") + (res.stderr or b"")
+                    err = out.decode("utf-8", errors="replace")
+                    if "CANNOT LINK EXECUTABLE" in err or "cannot locate symbol" in err:
+                        return False
+                    return res.returncode == 0 or "usage" in err.lower() or "options" in err.lower()
                 except Exception:
                     return False
 
@@ -284,20 +288,16 @@ class ModelRunner:
                 "-t", str(self.n_threads),
                 "-c", str(self.n_ctx),
             ]
-            # Force non-interactive single-turn completion mode
+            # Force non-interactive single-turn completion mode if supported by binary
             if "-no-cnv" in flags:
                 cmd.append("-no-cnv")
             elif "--no-conversation" in flags:
-                cmd.append("--no-conversation")
-            else:
                 cmd.append("--no-conversation")
 
             if "-st" in flags:
                 cmd.append("-st")
             elif "--single-turn" in flags:
                 cmd.append("--single-turn")
-            else:
-                cmd.append("-st")
 
             no_display_prompt_active = False
             if "--no-display-prompt" in flags:

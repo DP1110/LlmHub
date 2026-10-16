@@ -198,6 +198,7 @@ class TokenRoundRobinScheduler:
                     primary_session.chunk_size or self.default_chunk_size,
                 )
         except Exception as e:
+            logger.error("Inference batch step failed for model '%s': %s", loaded_model.tag, e, exc_info=True)
             for s in model_sessions:
                 s.phase = SessionPhase.FAILED
                 s.error = str(e)
@@ -303,6 +304,7 @@ class TokenRoundRobinScheduler:
 
         # 6b. Dispatch isolated slot failures without impacting other active sessions
         for sid, err_msg in batch_res.failed_sessions.items():
+            logger.error("Session %s failed during batch step: %s", sid, err_msg)
             s = next((x for x in model_sessions if x.session_id == sid), None)
             if s and not s.is_done:
                 s.phase = SessionPhase.FAILED

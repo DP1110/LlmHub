@@ -134,7 +134,9 @@ echo -e "\n${BOLD}[4.5/5] Checking native llama.cpp ARM64 binary...${NC}"
 
 is_binary_runnable() {
     local bin="$1"
-    [ -n "$bin" ] && [ -x "$bin" ] && "$bin" --version >/dev/null 2>&1
+    [ -n "$bin" ] && [ -x "$bin" ] && {
+        "$bin" --version >/dev/null 2>&1 || "$bin" -h >/dev/null 2>&1 || "$bin" --help >/dev/null 2>&1
+    }
 }
 
 LLAMA_BIN=""

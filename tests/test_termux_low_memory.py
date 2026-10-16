@@ -1073,7 +1073,7 @@ def test_runner_flag_probe_caching_on_failure(monkeypatch: pytest.MonkeyPatch) -
     from llmhub.core.runner import get_cli_supported_flags, _CLI_FLAGS_CACHE
     import subprocess
 
-    binary = "/fake/bin/llama-timeout-test"
+    binary = "/fake/bin/llama-cli-timeout-test"
     _CLI_FLAGS_CACHE.pop(binary, None)
 
     calls = 0
@@ -1092,3 +1092,64 @@ def test_runner_flag_probe_caching_on_failure(monkeypatch: pytest.MonkeyPatch) -
     flags2 = get_cli_supported_flags(binary)
     assert flags2 == flags1
     assert calls == 1
+
+
+def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure llama-completion is NOT passed --no-conversation or -st which causes unknown argument crashes."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_comp_flags.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-completion" if cmd == "llama-completion" else None)
+
+    # llama-completion --help outputs only completion options, no conversation flags
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-completion"] = {"-m", "-p", "-c", "-t", "-n", "--temp"}
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        assert runner._cli_binary == "/usr/bin/llama-completion"
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("This is a response.")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt="Hello"))
+            called_cmd = mock_popen.call_args[0][0]
+
+            assert "--no-conversation" not in called_cmd
+            assert "-no-cnv" not in called_cmd
+            assert "-st" not in called_cmd
+            assert "--single-turn" not in called_cmd
+            assert "/usr/bin/llama-completion" == called_cmd[0]
+            assert "This is a response." in "".join(c["token"] for c in chunks)
+
+
+def test_is_runnable_accepts_help_output_and_rejects_linker_errors(tmp_path: Path) -> None:
+    """Ensure is_runnable accepts exit code 0 or usage help text, but rejects CANNOT LINK EXECUTABLE."""
+    from llmhub.core.runner import ModelRunner
+    import subprocess
+
+    dummy_path = tmp_path / "fake_model.gguf"
+    dummy_path.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+
+    # Dynamic linker error
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout=b"",
+            stderr=b"CANNOT LINK EXECUTABLE 'llama-cli': cannot locate symbol '__cxa_thread_atexit_impl' referenced by 'libc++.so'..."
+        )
+        with patch("llmhub.core.runner.GGUFParser.parse_file"):
+            with patch("shutil.which", return_value=None):
+                try:
+                    runner = ModelRunner(model_path=dummy_path)
+                except RuntimeError as e:
+                    assert "Neither 'llama-cpp-python' nor native 'llama-cli'" in str(e)

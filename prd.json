@@ -913,7 +913,7 @@
         "Stop tokens strictly evaluated on post-prompt generated text, preventing premature abortion on <|im_end|> in prompt",
         "install-termux.sh builds and symlinks both llama-cli and llama-completion",
         "Web UI gracefully handles empty streams with user-friendly diagnostics",
-        "100% test pass rate across all 194 tests in test suite"
+        "100% test pass rate across all 196 tests in test suite"
       ]
     }
   ]
