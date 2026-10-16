@@ -1,6 +1,7 @@
 """Tests for Phase 8: Termux, Android non-root sandbox, wakelock, thermals, and low-memory mode."""
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Dict, List
 from unittest.mock import MagicMock, patch
@@ -875,6 +876,219 @@ def test_runner_cli_mid_generation_sigkill_surfaces_error(tmp_path: Path, monkey
                 list(runner.stream_completion(prompt="Generate a long essay"))
 
 
+def test_runner_cli_prompt_leader_and_banner_stripped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure prompt leaders ('> ') and interactive banners preceding the prompt are cleanly filtered."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_banner.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st", "-no-cnv"}
+
+    prompt = "<|im_start|>system\nYou are a helpful offline assistant.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    # Output includes banner, leader '> ', echoed prompt with <|im_end|>, and actual generation
+    stream_output = (
+        "/regen      regenerate the last response\n"
+        "/clear      clear the chat history\n\n"
+        "> <|im_start|>system\nYou are a helpful offline assistant.<|im_end|>\n"
+        "<|im_start|>user\nHi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "Hello! How can I assist you today?<|im_end|>"
+    )
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "/regen" not in full_text
+            assert "system" not in full_text
+            assert "<|im_start|>" not in full_text
+            assert "<|im_end|>" not in full_text
+            assert "Hello! How can I assist you today?" in full_text
+            assert chunks[-1]["done"] is True
+
+            # Verify Popen arguments
+            call_kwargs = mock_popen.call_args[1]
+            assert call_kwargs["env"]["TERM"] == "dumb"
+            assert call_kwargs["env"]["NO_COLOR"] == "1"
+            if sys.platform != "win32":
+                assert call_kwargs.get("start_new_session") is True
 
 
+def test_llamacpp_backend_cli_prompt_leader_and_stop_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend yields tokens even when llama-cli prepends leaders and banners."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as llamacpp_mod
+    import shutil
+    import io
 
+    dummy = tmp_path / "model_leader.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    prompt = "<|im_start|>system\nYou are an AI.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+    stream_output = (
+        "> <|im_start|>system\nYou are an AI.<|im_end|>\n"
+        "<|im_start|>user\nHi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "Hello from Termux offline web GUI!<|im_end|>"
+    )
+
+    with patch("llmhub.server.llamacpp.GGUFParser.parse_file"):
+        backend = LlamaCppBackend()
+        backend.load(dummy, n_ctx=1024, n_threads=4)
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            sess = backend.new_session("sess-leader", prompt=prompt, stop=["<|im_end|>"])
+            res = backend.decode_step("sess-leader", n_tokens=20)
+
+            assert "Hello from Termux offline web GUI!" in sess.generated_text
+            assert "<|im_end|>" not in sess.generated_text
+            backend.close_session("sess-leader")
+            backend.unload()
+
+
+def test_candidate_selection_prioritizes_llama_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure llama-completion is prioritized over llama-cli when present."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+
+    dummy = tmp_path / "test_comp.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+
+    def fake_which(name: str):
+        if name == "llama-completion":
+            return "/usr/bin/llama-completion"
+        if name == "llama-cli":
+            return "/usr/bin/llama-cli"
+        return None
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            runner = ModelRunner(model_path=dummy)
+            assert runner._cli_binary == "/usr/bin/llama-completion"
+
+
+def test_runner_cli_model_repeats_prompt_substring_in_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure stop tokens are not miscalculated or corrupted when response quotes or repeats the prompt (CRIT-1)."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_repeat.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    prompt = "Tell me a joke"
+    # Model echoes prompt, then in its answer says: "You asked: Tell me a joke! Here is one: Why did the chicken cross the road?</s>"
+    stream_output = (
+        "Tell me a joke\n"
+        "You asked: Tell me a joke! Here is one: Why did the chicken cross the road?</s>"
+    )
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["</s>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "</s>" not in full_text
+            assert "Why did the chicken cross the road?" in full_text
+            assert "You asked: Tell me a joke!" in full_text
+            assert chunks[-1]["done"] is True
+
+
+def test_runner_cli_slash_starting_response_does_not_stall(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure responses starting with '/' (e.g. file paths) stream immediately without stalling (CRIT-2)."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_slash.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    prompt = "Where is the file located?"
+    # Model immediately outputs a file path without echoing prompt
+    stream_output = "/home/termux/workspace/main.py is located here."
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "/home/termux/workspace/main.py" in full_text
+            assert chunks[-1]["done"] is True
+
+
+def test_runner_flag_probe_caching_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure flag probing caches default flags even when --help fails or times out (CRIT-3)."""
+    from llmhub.core.runner import get_cli_supported_flags, _CLI_FLAGS_CACHE
+    import subprocess
+
+    binary = "/fake/bin/llama-timeout-test"
+    _CLI_FLAGS_CACHE.pop(binary, None)
+
+    calls = 0
+    def fake_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=10.0)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    flags1 = get_cli_supported_flags(binary)
+    assert "-st" in flags1
+    assert calls == 1
+
+    # Second call must hit cache and NOT invoke subprocess.run again
+    flags2 = get_cli_supported_flags(binary)
+    assert flags2 == flags1
+    assert calls == 1

@@ -1366,13 +1366,36 @@
           }
         }
 
-        if (!streamedText && buffer) {
-          try {
-            const parsed = JSON.parse(buffer);
-            const content = parsed.choices?.[0]?.message?.content;
-            if (content) streamedText = content;
-            contentElem.textContent = streamedText;
-          } catch (e) {}
+        if (buffer && buffer.trim()) {
+          const cleanBuf = buffer.trim();
+          if (cleanBuf.startsWith('data:')) {
+            const dataStr = cleanBuf.slice(5).trim();
+            if (dataStr && dataStr !== '[DONE]') {
+              try {
+                const parsed = JSON.parse(dataStr);
+                const delta = parsed.choices?.[0]?.delta?.content || '';
+                if (delta) {
+                  streamedText += delta;
+                  contentElem.textContent = streamedText;
+                }
+              } catch (e) {}
+            }
+          } else if (!streamedText) {
+            try {
+              const parsed = JSON.parse(cleanBuf);
+              const content = parsed.choices?.[0]?.message?.content;
+              if (content) streamedText = content;
+              contentElem.textContent = streamedText;
+            } catch (e) {}
+          }
+        }
+
+        if (!streamedText) {
+          contentElem.innerHTML = `
+            <div style="color:var(--text-muted); font-size:0.85rem; font-style:italic;">
+              (No response tokens received from model runtime. If running in Termux, check server terminal output or re-run <code>bash install-termux.sh</code> to ensure native llama-completion binary is linked.)
+            </div>
+          `;
         }
 
         chatHistory.push({ role: 'assistant', content: streamedText });

@@ -898,6 +898,23 @@
         "Added mobile-responsive styling for screens <= 768px in index.html for Android Termux mobile browser usability",
         "100% test pass rate across all 188 tests in test suite"
       ]
+    },
+    {
+      "id": "US-070",
+      "title": "Native llama-cli /dev/tty Detachment, Non-Interactive Flag Hardening, and Robust Prompt-Echo Stripping",
+      "phase": 11,
+      "description": "Detach native llama-cli subprocesses from /dev/tty using start_new_session and TERM=dumb to prevent terminal token leakage, prioritize llama-completion binary, enforce non-interactive flags, and harden prompt stripping against leaders ('> ') and stop tokens in system prompts.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Prioritize llama-completion binary over llama-cli for non-interactive completions",
+        "Subprocess execution passes start_new_session=True on POSIX and sets TERM=dumb and NO_COLOR=1",
+        "Non-interactive flags (-no-cnv / --no-conversation and -st / --single-turn) enforced in cmd construction",
+        "Prompt echo stripper handles prompt leaders ('> ', '>>> ') and banners before prompt",
+        "Stop tokens strictly evaluated on post-prompt generated text, preventing premature abortion on <|im_end|> in prompt",
+        "install-termux.sh builds and symlinks both llama-cli and llama-completion",
+        "Web UI gracefully handles empty streams with user-friendly diagnostics",
+        "100% test pass rate across all 194 tests in test suite"
+      ]
     }
   ]
 }

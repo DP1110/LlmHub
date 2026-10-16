@@ -138,7 +138,7 @@ is_binary_runnable() {
 }
 
 LLAMA_BIN=""
-for cand in "llama-cli" "llama" "llama-run" "llama-completion"; do
+for cand in "llama-completion" "llama-cli" "llama" "llama-run"; do
     if command -v "$cand" >/dev/null 2>&1; then
         cand_path="$(command -v "$cand")"
         if is_binary_runnable "$cand_path"; then
@@ -162,20 +162,26 @@ for cand in "llama-cli" "llama" "llama-run" "llama-completion"; do
 done
 
 # If binary is present in PREFIX/bin but failed execution due to dynamic linking (ABI symbol mismatch)
-if [ -z "$LLAMA_BIN" ] && [ -x "${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli" ]; then
-    echo -e "${YELLOW}[!] Package binary at ${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli failed link verification.${NC}"
-    echo -e "    Attempting automatic fix by upgrading Termux libc++ package..."
-    pkg install -y libc++ 2>/dev/null || true
-    if is_binary_runnable "${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli"; then
-        LLAMA_BIN="${PREFIX:-/data/data/com.termux/files/usr}/bin/llama-cli"
-        echo -e "${GREEN}[+] Successfully resolved dynamic linking issue for llama-cli!${NC}"
-    fi
+if [ -z "$LLAMA_BIN" ]; then
+    for probe_bin in llama-completion llama-cli; do
+        probe_path="${PREFIX:-/data/data/com.termux/files/usr}/bin/$probe_bin"
+        if [ -x "$probe_path" ]; then
+            echo -e "${YELLOW}[!] Package binary at $probe_path failed link verification.${NC}"
+            echo -e "    Attempting automatic fix by upgrading Termux libc++ package..."
+            pkg install -y libc++ 2>/dev/null || true
+            if is_binary_runnable "$probe_path"; then
+                LLAMA_BIN="$probe_path"
+                echo -e "${GREEN}[+] Successfully resolved dynamic linking issue for $probe_bin!${NC}"
+                break
+            fi
+        fi
+    done
 fi
 
 if [ -n "$LLAMA_BIN" ]; then
     echo -e "${GREEN}[+] Verified working native llama.cpp binary: ${LLAMA_BIN}${NC}"
 else
-    echo -e "${YELLOW}[!] Working llama-cli not found in system packages. Building latest llama.cpp natively...${NC}"
+    echo -e "${YELLOW}[!] Working llama binaries not found in system packages. Building latest llama.cpp natively...${NC}"
     mkdir -p "$HOME"
     if [ ! -d "$HOME/llama.cpp" ]; then
         echo -e "Cloning latest llama.cpp..."
@@ -185,20 +191,36 @@ else
         (cd "$HOME/llama.cpp" && (git pull --ff-only 2>/dev/null || git fetch --depth 1 2>/dev/null) || true)
     fi
     mkdir -p "$HOME/llama.cpp/build"
-    echo -e "Compiling llama-cli with NEON / OpenBLAS acceleration..."
+    echo -e "Compiling native binaries with NEON / OpenBLAS acceleration..."
     cmake -B "$HOME/llama.cpp/build" -S "$HOME/llama.cpp" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_OPENBLAS=on \
         -DGGML_NEON=on
-    cmake --build "$HOME/llama.cpp/build" --target llama-cli -j4 || cmake --build "$HOME/llama.cpp/build" --target llama-cli -j2
-    if [ -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
-        LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-cli"
+    cmake --build "$HOME/llama.cpp/build" --target llama-completion --target llama-cli -j4 2>/dev/null || \
+    cmake --build "$HOME/llama.cpp/build" --target llama-completion --target llama-cli -j2 || \
+    cmake --build "$HOME/llama.cpp/build" --target llama-completion -j1 || \
+    cmake --build "$HOME/llama.cpp/build" --target llama-cli -j1
+
+    if [ -f "$HOME/llama.cpp/build/bin/llama-completion" ]; then
+        LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-completion"
         if [ -w "$TERMUX_BIN" ]; then
-            ln -sf "$LLAMA_BIN" "$TERMUX_BIN/llama-cli"
+            ln -sf "$LLAMA_BIN" "$TERMUX_BIN/llama-completion"
         fi
-        echo -e "${GREEN}[+] Successfully built native llama-cli at ${LLAMA_BIN}${NC}"
-    else
-        echo -e "${RED}[ERROR] Could not build llama-cli. Please install via: pkg install llama-cpp${NC}"
+        echo -e "${GREEN}[+] Successfully built native llama-completion at ${LLAMA_BIN}${NC}"
+    fi
+
+    if [ -f "$HOME/llama.cpp/build/bin/llama-cli" ]; then
+        if [ -z "$LLAMA_BIN" ]; then
+            LLAMA_BIN="$HOME/llama.cpp/build/bin/llama-cli"
+        fi
+        if [ -w "$TERMUX_BIN" ]; then
+            ln -sf "$HOME/llama.cpp/build/bin/llama-cli" "$TERMUX_BIN/llama-cli"
+        fi
+        echo -e "${GREEN}[+] Successfully built native llama-cli at $HOME/llama.cpp/build/bin/llama-cli${NC}"
+    fi
+
+    if [ -z "$LLAMA_BIN" ]; then
+        echo -e "${RED}[ERROR] Could not build llama binaries. Please install via: pkg install llama-cpp${NC}"
     fi
 fi
 

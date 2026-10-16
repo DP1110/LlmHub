@@ -7,6 +7,7 @@ Features:
 - Interactive REPL and one-shot prompt support
 """
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -40,27 +41,38 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
         import re
         res = subprocess.run(
             [cli_binary, "--help"],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=3.0,
+            timeout=10.0,
             check=False
         )
-        if res.returncode == 0:
-            help_text = (res.stdout or "") + "\n" + (res.stderr or "")
-            supported = set(re.findall(r"(--?[\w-]+)", help_text))
-            probed_ok = True
+        help_text = (res.stdout or "") + "\n" + (res.stderr or "")
+        if help_text.strip():
+            matched = set(re.findall(r"(--?[\w-]+)", help_text))
+            if len(matched) > 5:
+                supported = matched
+                probed_ok = True
     except Exception:
         pass
 
-    # Universal default fallback if flags couldn't be discovered (e.g. mocked or timeout)
+    # Universal default fallback if flags couldn't be discovered (e.g. timeout or minimal mock)
+    default_flags = {
+        "-st", "--single-turn",
+        "-no-cnv", "--no-conversation",
+        "--no-display-prompt",
+        "--log-disable",
+        "--special",
+        "-r", "--reverse-prompt"
+    }
     if not supported:
-        supported.add("-st")
+        supported.update(default_flags)
 
-    if probed_ok:
-        _CLI_FLAGS_CACHE[cli_binary] = supported
+    # Always cache result to prevent repeated 10s probe timeouts on slow mobile devices
+    _CLI_FLAGS_CACHE[cli_binary] = supported
     return supported
 
 def ends_with_stop_prefix(text: str, stop_seqs: Optional[List[str]]) -> bool:
@@ -131,7 +143,7 @@ class ModelRunner:
             import subprocess
 
             candidates = []
-            for name in ["llama-cli", "llama", "llama-run", "llama-completion"]:
+            for name in ["llama-completion", "llama-cli", "llama", "llama-run"]:
                 w = shutil.which(name)
                 if w and w not in candidates:
                     candidates.append(w)
@@ -141,15 +153,22 @@ class ModelRunner:
                     candidates.append(w)
 
             bin_name = "llama-cli.exe" if sys.platform == "win32" else "llama-cli"
+            comp_name = "llama-completion.exe" if sys.platform == "win32" else "llama-completion"
             main_name = "main.exe" if sys.platform == "win32" else "main"
             for p in [
+                Path.home() / "llama.cpp" / "build" / "bin" / comp_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / bin_name,
+                Path.home() / "llama.cpp" / "build" / "bin" / "Release" / comp_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / "Release" / bin_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / main_name,
+                Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-completion"),
                 Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
-                Path("/opt/homebrew/bin/llama-cli"),
-                Path("/usr/local/bin/llama-cli"),
+                Path("/data/data/com.termux/files/usr/bin/llama-completion"),
                 Path("/data/data/com.termux/files/usr/bin/llama-cli"),
+                Path("/opt/homebrew/bin/llama-completion"),
+                Path("/opt/homebrew/bin/llama-cli"),
+                Path("/usr/local/bin/llama-completion"),
+                Path("/usr/local/bin/llama-cli"),
             ]:
                 if p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK)):
                     sp = str(p)
@@ -265,22 +284,34 @@ class ModelRunner:
                 "-t", str(self.n_threads),
                 "-c", str(self.n_ctx),
             ]
+            # Force non-interactive single-turn completion mode
             if "-no-cnv" in flags:
                 cmd.append("-no-cnv")
             elif "--no-conversation" in flags:
+                cmd.append("--no-conversation")
+            else:
                 cmd.append("--no-conversation")
 
             if "-st" in flags:
                 cmd.append("-st")
             elif "--single-turn" in flags:
                 cmd.append("--single-turn")
+            else:
+                cmd.append("-st")
 
             no_display_prompt_active = False
             if "--no-display-prompt" in flags:
                 cmd.append("--no-display-prompt")
                 no_display_prompt_active = True
+            elif "-no-display-prompt" in flags:
+                cmd.append("-no-display-prompt")
+                no_display_prompt_active = True
+
             if "--log-disable" in flags:
                 cmd.append("--log-disable")
+            elif "-ld" in flags:
+                cmd.append("-ld")
+
             if "--special" in flags:
                 cmd.append("--special")
 
@@ -289,16 +320,24 @@ class ModelRunner:
                 for s in stop:
                     cmd.extend(["-r", s])
 
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                bufsize=1
-            )
+            env = dict(os.environ)
+            env["TERM"] = "dumb"
+            env["NO_COLOR"] = "1"
+
+            popen_kwargs: Dict[str, Any] = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.PIPE,
+                "text": True,
+                "encoding": "utf-8",
+                "errors": "replace",
+                "bufsize": 1,
+                "env": env,
+            }
+            if sys.platform != "win32":
+                popen_kwargs["start_new_session"] = True
+
+            proc = subprocess.Popen(cmd, **popen_kwargs)
             stderr_chunks: List[str] = []
             def _drain_stderr() -> None:
                 try:
@@ -320,7 +359,7 @@ class ModelRunner:
                 # Fluid token/character-based chunk streaming with prompt echo filtering
                 buffer = ""
                 initial_buffer = ""
-                prompt_stripped = not bool(prompt) or no_display_prompt_active
+                prompt_stripped = not bool(prompt)
                 clean_prompt = prompt.strip() if prompt else ""
                 while not hit_stop:
                     char = proc.stdout.read(1)
@@ -330,30 +369,52 @@ class ModelRunner:
                     # Detect and strip prompt if llama-cli echoed it
                     if not prompt_stripped:
                         initial_buffer += char
-                        cand = initial_buffer.lstrip("\r\n ")
-                        if clean_prompt and clean_prompt.startswith(cand):
-                            if cand == clean_prompt:
-                                prompt_stripped = True
-                                initial_buffer = ""
-                                accumulated_output = ""
-                            continue
-                        elif clean_prompt and clean_prompt in initial_buffer:
+
+                        # 1. Clean match: clean_prompt appeared in initial_buffer
+                        if clean_prompt and clean_prompt in initial_buffer:
                             prompt_stripped = True
                             remainder = initial_buffer.split(clean_prompt, 1)[1]
-                            buffer = remainder.lstrip("\r\n ")
+                            buffer = remainder.lstrip("\r\n >\t")
                             accumulated_output = buffer
                             initial_buffer = ""
-                        else:
-                            # Diverged from prompt prefix: output is generated text, not prompt echo
-                            prompt_stripped = True
-                            buffer = initial_buffer
-                            accumulated_output = initial_buffer
-                            initial_buffer = ""
+                            continue
+
+                        # 2. In-progress prefix match (strip prompt leaders like "> ")
+                        cand = initial_buffer.lstrip("\r\n >\t")
+                        if not cand:
+                            continue
+
+                        if clean_prompt and clean_prompt.startswith(cand):
+                            continue
+
+                        # 3. Check if clean_prompt start appears after some banner or menu
+                        prompt_head = clean_prompt[:min(30, len(clean_prompt))] if clean_prompt else ""
+                        if prompt_head and prompt_head in initial_buffer:
+                            initial_buffer = initial_buffer[initial_buffer.find(prompt_head):]
+                            continue
+
+                        # 4. If candidate matches a known banner or leader, continue buffering
+                        known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob")
+                        is_leader = initial_buffer.lstrip("\r\n \t").startswith(">")
+                        is_banner = is_leader or any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
+                        if is_banner:
+                            if len(initial_buffer) > len(clean_prompt) + 512 or len(initial_buffer) > 1024:
+                                prompt_stripped = True
+                                buffer = initial_buffer
+                                accumulated_output = initial_buffer
+                                initial_buffer = ""
+                            continue
+
+                        # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
+                        prompt_stripped = True
+                        buffer = initial_buffer
+                        accumulated_output = initial_buffer
+                        initial_buffer = ""
                     else:
                         buffer += char
                         accumulated_output += char
 
-                    # Check stop sequences only on assistant generated text
+                    # Check stop sequences only on assistant generated text (never inside prompt)
                     if prompt_stripped and stop:
                         for s in stop:
                             if s in accumulated_output:
@@ -418,7 +479,10 @@ class ModelRunner:
                         proc.wait(timeout=2.0)
                     except (subprocess.TimeoutExpired, Exception):
                         proc.kill()
-                        proc.wait()
+                        try:
+                            proc.wait(timeout=2.0)
+                        except (subprocess.TimeoutExpired, Exception):
+                            pass
                 else:
                     try:
                         proc.wait(timeout=1.0)
