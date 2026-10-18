@@ -930,6 +930,20 @@
         "ModelRegistry.find_model resolves shorthand model aliases for local model loading across CLI and server",
         "100% test pass rate across all 204 tests in test suite"
       ]
+    },
+    {
+      "id": "US-072",
+      "title": "Native llama-cli Reverse-Prompt Neutralization and Header-Aware Output Extraction",
+      "phase": 11,
+      "description": "Eliminate catastrophic -r/--reverse-prompt injection on modern chat templates (SmolLM2, Qwen2.5, Llama-3) that caused premature antiprompt halts and 0-token yields, introduce assistant turn header stripping (ASSISTANT_HEADERS) to cleanly extract generated text from echoed prompts, protect diverged buffers against stop sequence contamination, and harden non-zero exit code error surfacing.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Remove -r and --reverse-prompt from ModelRunner and LlamaCppBackend command construction",
+        "Implement ASSISTANT_HEADERS and strip_assistant_header helper extracting genuine assistant responses across ChatML, Llama-3, and Alpaca formats",
+        "Strip stop token markers from diverged prompt buffers before assigning accumulated_output to prevent false-positive stop triggers",
+        "Ensure non-zero subprocess returncodes with 0 tokens or non-stop termination surface descriptive RuntimeError diagnostics with stderr details",
+        "100% test pass rate across all 206 tests in test suite"
+      ]
     }
   ]
 }

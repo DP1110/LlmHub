@@ -740,7 +740,7 @@ def test_runner_cli_partial_prompt_match_at_eof(tmp_path: Path, monkeypatch: pyt
 
 
 def test_runner_cli_reverse_prompt_stop_sequence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure stop sequences are passed via -r and stop execution early."""
+    """Ensure stop sequences are handled purely in Python streaming without injecting -r flags."""
     from llmhub.core.runner import ModelRunner
     import llmhub.core.runner as runner_mod
     import shutil
@@ -768,9 +768,10 @@ def test_runner_cli_reverse_prompt_stop_sequence(tmp_path: Path, monkeypatch: py
             assert "Here is the answer." in full_text
             assert "More ignored text" not in full_text
 
-            # Check -r was passed
+            # Check -r was NOT passed to avoid premature antiprompt trigger on prompt tokens
             called_cmd = mock_popen.call_args[0][0]
-            assert "-r" in called_cmd
+            assert "-r" not in called_cmd
+            assert "--reverse-prompt" not in called_cmd
 
 
 def test_runner_cli_chat_template_stop_token_not_triggered_by_prompt_echo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1153,3 +1154,87 @@ def test_is_runnable_accepts_help_output_and_rejects_linker_errors(tmp_path: Pat
                     runner = ModelRunner(model_path=dummy_path)
                 except RuntimeError as e:
                     assert "Neither 'llama-cpp-python' nor native 'llama-cli'" in str(e)
+
+
+def test_runner_cli_prompt_containing_stop_token_with_no_display_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure prompts with <|im_end|> under --no-display-prompt emit tokens immediately without premature stop."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_no_echo.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st", "--no-display-prompt", "-r"}
+
+    chat_prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\nExplain Python.<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            # Under --no-display-prompt, stdout outputs ONLY assistant generated tokens
+            mock_proc.stdout = io.StringIO("Python is a high-level programming language.<|im_end|>unwanted")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=chat_prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "Python is a high-level programming language." in full_text
+            assert "unwanted" not in full_text
+            assert "<|im_end|>" not in full_text
+            assert chunks[-1]["done"] is True
+            assert chunks[-1]["token_count"] >= 1
+
+            called_cmd = mock_popen.call_args[0][0]
+            assert "--no-display-prompt" in called_cmd
+            assert "-r" not in called_cmd
+
+
+def test_llamacpp_backend_cli_does_not_pass_reverse_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend never passes -r to subprocess and generates tokens without antiprompt halt."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as llamacpp_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "model_backend_stop.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    import llmhub.core.runner as runner_mod
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st", "-r", "--no-display-prompt"}
+
+    with patch("llmhub.server.llamacpp.GGUFParser.parse_file"):
+        backend = LlamaCppBackend()
+        backend.load(dummy, n_ctx=1024, n_threads=4)
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO("Claude is an AI assistant.<|im_end|>More text")
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            sess = backend.new_session("sess-stop-test", prompt="<|im_start|>user\nWho is Claude?<|im_end|>\n<|im_start|>assistant\n")
+            step = backend.decode_step("sess-stop-test", n_tokens=20)
+
+            called_cmd = mock_popen.call_args[0][0]
+            assert "-r" not in called_cmd
+            assert "--reverse-prompt" not in called_cmd
+            assert "Claude is an AI assistant." in sess.generated_text
+            assert "<|im_end|>" not in sess.generated_text
+            assert "More text" not in sess.generated_text
+

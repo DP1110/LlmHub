@@ -63,7 +63,7 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
     is_cli = "llama-cli" in cli_binary.lower() or "llama-run" in cli_binary.lower()
     default_flags = {
         "-m", "-p", "-f", "-c", "-t", "-n", "--temp",
-        "--log-disable", "--special", "-r", "--reverse-prompt"
+        "--log-disable", "--special"
     }
     if is_cli:
         default_flags.update({"-st", "--single-turn", "-no-cnv", "--no-conversation", "--no-display-prompt"})
@@ -73,6 +73,33 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
     # Always cache result to prevent repeated 10s probe timeouts on slow mobile devices
     _CLI_FLAGS_CACHE[cli_binary] = supported
     return supported
+
+ASSISTANT_HEADERS = (
+    "<|im_start|>assistant\n",
+    "<|im_start|>assistant",
+    "<|start_header_id|>assistant<|end_header_id|>\n\n",
+    "<|start_header_id|>assistant<|end_header_id|>",
+    "[INST] ",
+    "[/INST]",
+    "\nAssistant:\n",
+    "\nAssistant: ",
+    "\nAssistant:",
+    "Assistant: ",
+    "Assistant:",
+)
+
+def strip_assistant_header(text: str) -> Optional[str]:
+    """Find known assistant turn headers and return text after the last header."""
+    best_pos = -1
+    best_len = 0
+    for h in ASSISTANT_HEADERS:
+        pos = text.rfind(h)
+        if pos != -1 and pos >= best_pos:
+            best_pos = pos
+            best_len = len(h)
+    if best_pos != -1:
+        return text[best_pos + best_len:].lstrip("\r\n ")
+    return None
 
 def ends_with_stop_prefix(text: str, stop_seqs: Optional[List[str]]) -> bool:
     """Return True if text ends with a non-empty prefix of any stop sequence."""
@@ -315,10 +342,11 @@ class ModelRunner:
             if "--special" in flags:
                 cmd.append("--special")
 
-            has_reverse_prompt = ("-r" in flags) or ("--reverse-prompt" in flags)
-            if has_reverse_prompt and stop:
-                for s in stop:
-                    cmd.extend(["-r", s])
+            # Note: Do NOT pass -r/--reverse-prompt to native llama-cli. Modern instruct models
+            # have stop tokens (like <|im_end|>, <|eot_id|>) embedded in their system/user prompt.
+            # Passing -r triggers llama-cli to treat the prompt as an antiprompt, immediately halting
+            # generation and yielding to stdin (which hits DEVNULL EOF and produces 0 tokens).
+            # Python streaming handles stop sequences reliably on generated text.
 
             env = dict(os.environ)
             env["TERM"] = "dumb"
@@ -379,7 +407,16 @@ class ModelRunner:
                             initial_buffer = ""
                             continue
 
-                        # 2. In-progress prefix match (strip prompt leaders like "> ")
+                        # 2. Assistant turn header match (ChatML, Llama-3, Alpaca, etc.)
+                        hdr = strip_assistant_header(initial_buffer)
+                        if hdr is not None:
+                            prompt_stripped = True
+                            buffer = hdr
+                            accumulated_output = hdr
+                            initial_buffer = ""
+                            continue
+
+                        # 3. In-progress prefix match (strip prompt leaders like "> ")
                         cand = initial_buffer.lstrip("\r\n >\t")
                         if not cand:
                             continue
@@ -387,28 +424,51 @@ class ModelRunner:
                         if clean_prompt and clean_prompt.startswith(cand):
                             continue
 
-                        # 3. Check if clean_prompt start appears after some banner or menu
+                        # 4. Check if clean_prompt start appears after some banner or menu
                         prompt_head = clean_prompt[:min(30, len(clean_prompt))] if clean_prompt else ""
                         if prompt_head and prompt_head in initial_buffer:
                             initial_buffer = initial_buffer[initial_buffer.find(prompt_head):]
                             continue
 
-                        # 4. If candidate matches a known banner or leader, continue buffering
+                        # 5. If candidate matches a known banner or leader, continue buffering
                         known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob")
                         is_leader = initial_buffer.lstrip("\r\n \t").startswith(">")
                         is_banner = is_leader or any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
                         if is_banner:
                             if len(initial_buffer) > len(clean_prompt) + 512 or len(initial_buffer) > 1024:
                                 prompt_stripped = True
-                                buffer = initial_buffer
-                                accumulated_output = initial_buffer
+                                hdr_b = strip_assistant_header(initial_buffer)
+                                if hdr_b is not None:
+                                    buffer = hdr_b
+                                    accumulated_output = hdr_b
+                                else:
+                                    buffer = initial_buffer
+                                    accumulated_output = initial_buffer
                                 initial_buffer = ""
                             continue
 
-                        # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
+                        # 6. Diverged from prompt prefix and not a banner: output is genuine generated text
                         prompt_stripped = True
-                        buffer = initial_buffer
-                        accumulated_output = initial_buffer
+                        hdr_div = strip_assistant_header(initial_buffer)
+                        if hdr_div is not None:
+                            buffer = hdr_div
+                            accumulated_output = hdr_div
+                        else:
+                            last_stop_pos = -1
+                            last_stop_len = 0
+                            if stop:
+                                for s in stop:
+                                    pos = initial_buffer.rfind(s)
+                                    if pos != -1 and pos >= last_stop_pos:
+                                        last_stop_pos = pos
+                                        last_stop_len = len(s)
+                            if last_stop_pos != -1:
+                                tail = initial_buffer[last_stop_pos + last_stop_len:].lstrip("\r\n >\t")
+                                buffer = tail
+                                accumulated_output = tail
+                            else:
+                                buffer = initial_buffer.lstrip("\r\n >\t")
+                                accumulated_output = buffer
                         initial_buffer = ""
                     else:
                         buffer += char
@@ -451,7 +511,14 @@ class ModelRunner:
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
-                    buffer = initial_buffer + buffer
+                    if clean_prompt and clean_prompt in initial_buffer:
+                        buffer = initial_buffer.split(clean_prompt, 1)[1].lstrip("\r\n >\t") + buffer
+                    else:
+                        hdr = strip_assistant_header(initial_buffer)
+                        if hdr is not None:
+                            buffer = hdr + buffer
+                        else:
+                            buffer = initial_buffer + buffer
                     initial_buffer = ""
                     prompt_stripped = True
 
@@ -506,7 +573,7 @@ class ModelRunner:
             final_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
 
             rc = proc.returncode if isinstance(proc.returncode, int) else proc.poll()
-            if isinstance(rc, int) and rc != 0 and not hit_stop:
+            if isinstance(rc, int) and rc != 0 and (token_count == 0 or not hit_stop):
                 err_text = "".join(stderr_chunks).strip()
                 extra_hint = ""
                 if rc in (-9, 137, 9):
