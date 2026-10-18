@@ -941,8 +941,9 @@
         "Remove -r and --reverse-prompt from ModelRunner and LlamaCppBackend command construction",
         "Implement ASSISTANT_HEADERS and strip_assistant_header helper extracting genuine assistant responses across ChatML, Llama-3, and Alpaca formats",
         "Strip stop token markers from diverged prompt buffers before assigning accumulated_output to prevent false-positive stop triggers",
-        "Ensure non-zero subprocess returncodes with 0 tokens or non-stop termination surface descriptive RuntimeError diagnostics with stderr details",
-        "100% test pass rate across all 206 tests in test suite"
+        "Prioritize prompt prefix matching to prevent multi-turn dialogue truncation on echoed assistant turns",
+        "Ensure non-zero subprocess returncodes surface descriptive RuntimeError diagnostics without false positives on legitimate stop terminations",
+        "100% test pass rate across all 209 tests in test suite"
       ]
     }
   ]

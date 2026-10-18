@@ -1238,3 +1238,121 @@ def test_llamacpp_backend_cli_does_not_pass_reverse_prompt(tmp_path: Path, monke
             assert "<|im_end|>" not in sess.generated_text
             assert "More text" not in sess.generated_text
 
+
+def test_runner_cli_multi_turn_prompt_echo_not_truncated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure multi-turn prompts with previous assistant turns are NOT truncated by premature header matches."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_multiturn.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    multi_turn_prompt = (
+        "<|im_start|>user\nWhat is 2+2?<|im_end|>\n"
+        "<|im_start|>assistant\n2+2 is 4.<|im_end|>\n"
+        "<|im_start|>user\nWhat is 3+3?<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    # Binary echoes full prompt and then outputs the turn 2 answer
+    stream_output = multi_turn_prompt + "3+3 is 6.<|im_end|>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=multi_turn_prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            # Turn 1 content must NOT be returned as turn 2's answer
+            assert "2+2 is 4." not in full_text
+            assert "What is 3+3?" not in full_text
+            # Turn 2 answer must be present
+            assert "3+3 is 6." in full_text
+            assert "<|im_end|>" not in full_text
+            assert chunks[-1]["done"] is True
+
+
+def test_runner_cli_zero_token_stop_completion_does_not_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure legitimate 0-token stop completions do not falsely raise RuntimeError due to SIGTERM exit code."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_zero_tok.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st", "--no-display-prompt"}
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            # Model generates immediate stop token on first byte
+            mock_proc.stdout = io.StringIO("<|im_end|>")
+            mock_proc.stderr = io.StringIO("")
+            # Subprocess terminated via proc.terminate() has rc = -15
+            mock_proc.poll.return_value = -15
+            mock_proc.returncode = -15
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt="Hello", stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+            assert full_text == ""
+            assert chunks[-1]["done"] is True
+            assert chunks[-1]["token_count"] == 0
+
+
+def test_runner_cli_mistral_llama2_inst_tags_stripping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure Mistral / Llama-2 [INST] ... [/INST] prompts strip cleanly and do not treat [INST] as assistant header."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_inst.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    inst_prompt = "<s>[INST] What is Python? [/INST] "
+    stream_output = "<s>[INST] What is Python? [/INST] Python is an interpreted programming language.</s>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=inst_prompt, stop=["</s>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "[INST]" not in full_text
+            assert "[/INST]" not in full_text
+            assert "What is Python?" not in full_text
+            assert "Python is an interpreted programming language." in full_text
+            assert "</s>" not in full_text
+            assert chunks[-1]["done"] is True
+
+

@@ -9,6 +9,7 @@ Features:
 
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
@@ -28,58 +29,62 @@ from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_thr
 from llmhub.utils.platform import get_hardware_profile
 
 _CLI_FLAGS_CACHE: Dict[str, Any] = {}
+_CLI_FLAGS_LOCK = threading.Lock()
 
 def get_cli_supported_flags(cli_binary: str) -> Any:
     """Inspect and cache supported command-line flags for the llama-cli executable."""
-    if cli_binary in _CLI_FLAGS_CACHE:
-        return _CLI_FLAGS_CACHE[cli_binary]
+    with _CLI_FLAGS_LOCK:
+        if cli_binary in _CLI_FLAGS_CACHE:
+            return _CLI_FLAGS_CACHE[cli_binary]
 
-    supported = set()
-    probed_ok = False
-    try:
-        import subprocess
-        import re
-        res = subprocess.run(
-            [cli_binary, "--help"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=10.0,
-            check=False
-        )
-        help_text = (res.stdout or "") + "\n" + (res.stderr or "")
-        if help_text.strip():
-            matched = set(re.findall(r"(--?[\w-]+)", help_text))
-            if len(matched) > 5:
-                supported = matched
-                probed_ok = True
-    except Exception:
-        pass
+        supported = set()
+        probed_ok = False
+        try:
+            import subprocess
+            import re
+            res = subprocess.run(
+                [cli_binary, "--help"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10.0,
+                check=False
+            )
+            help_text = (res.stdout or "") + "\n" + (res.stderr or "")
+            if help_text.strip():
+                matched = set(re.findall(r"(--?[\w-]+)", help_text))
+                if len(matched) > 5:
+                    supported = matched
+                    probed_ok = True
+        except Exception:
+            pass
 
-    # Universal default fallback if flags couldn't be discovered (e.g. timeout or minimal mock)
-    is_cli = "llama-cli" in cli_binary.lower() or "llama-run" in cli_binary.lower()
-    default_flags = {
-        "-m", "-p", "-f", "-c", "-t", "-n", "--temp",
-        "--log-disable", "--special"
-    }
-    if is_cli:
-        default_flags.update({"-st", "--single-turn", "-no-cnv", "--no-conversation", "--no-display-prompt"})
-    if not supported:
-        supported.update(default_flags)
+        # Universal default fallback if flags couldn't be discovered (e.g. timeout or minimal mock)
+        is_cli = "llama-cli" in cli_binary.lower() or "llama-run" in cli_binary.lower()
+        default_flags = {
+            "-m", "-p", "-f", "-c", "-t", "-n", "--temp",
+            "--log-disable", "--special"
+        }
+        if is_cli:
+            default_flags.update({"-st", "--single-turn", "-no-cnv", "--no-conversation", "--no-display-prompt"})
+        if not supported:
+            supported.update(default_flags)
 
-    # Always cache result to prevent repeated 10s probe timeouts on slow mobile devices
-    _CLI_FLAGS_CACHE[cli_binary] = supported
-    return supported
+        # Always cache result to prevent repeated 10s probe timeouts on slow mobile devices
+        _CLI_FLAGS_CACHE[cli_binary] = supported
+        return supported
 
 ASSISTANT_HEADERS = (
     "<|im_start|>assistant\n",
     "<|im_start|>assistant",
     "<|start_header_id|>assistant<|end_header_id|>\n\n",
     "<|start_header_id|>assistant<|end_header_id|>",
-    "[INST] ",
+    "### Response:\n",
+    "### Response:",
+    "[/INST] ",
     "[/INST]",
     "\nAssistant:\n",
     "\nAssistant: ",
@@ -94,11 +99,12 @@ def strip_assistant_header(text: str) -> Optional[str]:
     best_len = 0
     for h in ASSISTANT_HEADERS:
         pos = text.rfind(h)
-        if pos != -1 and pos >= best_pos:
-            best_pos = pos
-            best_len = len(h)
+        if pos != -1:
+            if pos > best_pos or (pos == best_pos and len(h) > best_len):
+                best_pos = pos
+                best_len = len(h)
     if best_pos != -1:
-        return text[best_pos + best_len:].lstrip("\r\n ")
+        return text[best_pos + best_len:].lstrip("\r\n")
     return None
 
 def ends_with_stop_prefix(text: str, stop_seqs: Optional[List[str]]) -> bool:
@@ -407,30 +413,22 @@ class ModelRunner:
                             initial_buffer = ""
                             continue
 
-                        # 2. Assistant turn header match (ChatML, Llama-3, Alpaca, etc.)
-                        hdr = strip_assistant_header(initial_buffer)
-                        if hdr is not None:
-                            prompt_stripped = True
-                            buffer = hdr
-                            accumulated_output = hdr
-                            initial_buffer = ""
-                            continue
-
-                        # 3. In-progress prefix match (strip prompt leaders like "> ")
+                        # 2. In-progress prefix match (strip prompt leaders like "> ")
                         cand = initial_buffer.lstrip("\r\n >\t")
                         if not cand:
                             continue
 
+                        # Prioritize in-progress prefix match while binary is still echoing prompt
                         if clean_prompt and clean_prompt.startswith(cand):
                             continue
 
-                        # 4. Check if clean_prompt start appears after some banner or menu
+                        # 3. Check if clean_prompt start appears after some banner or menu
                         prompt_head = clean_prompt[:min(30, len(clean_prompt))] if clean_prompt else ""
                         if prompt_head and prompt_head in initial_buffer:
                             initial_buffer = initial_buffer[initial_buffer.find(prompt_head):]
                             continue
 
-                        # 5. If candidate matches a known banner or leader, continue buffering
+                        # 4. If candidate matches a known banner or leader, continue buffering
                         known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob")
                         is_leader = initial_buffer.lstrip("\r\n \t").startswith(">")
                         is_banner = is_leader or any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
@@ -447,7 +445,7 @@ class ModelRunner:
                                 initial_buffer = ""
                             continue
 
-                        # 6. Diverged from prompt prefix and not a banner: output is genuine generated text
+                        # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
                         prompt_stripped = True
                         hdr_div = strip_assistant_header(initial_buffer)
                         if hdr_div is not None:
@@ -522,6 +520,12 @@ class ModelRunner:
                     initial_buffer = ""
                     prompt_stripped = True
 
+                # Strip any stop sequences present at premature EOF flush (CRIT-4)
+                if buffer and stop:
+                    for s in stop:
+                        if s in buffer:
+                            buffer = buffer[:buffer.rfind(s)]
+
                 # Yield remaining buffer if any
                 if buffer:
                     token_count += 1
@@ -573,7 +577,7 @@ class ModelRunner:
             final_tok_s = (token_count / decode_duration) if decode_duration > 0.001 else 0.0
 
             rc = proc.returncode if isinstance(proc.returncode, int) else proc.poll()
-            if isinstance(rc, int) and rc != 0 and (token_count == 0 or not hit_stop):
+            if isinstance(rc, int) and rc != 0 and not hit_stop:
                 err_text = "".join(stderr_chunks).strip()
                 extra_hint = ""
                 if rc in (-9, 137, 9):
@@ -602,9 +606,6 @@ class ModelRunner:
                 "done": True
             }
             return
-
-        if stop is None:
-            stop = ["<|im_end|>", "<|eot_id|>", "</s>", "\nUser:", "<|end_of_text|>"]
 
         start_time = time.perf_counter()
         first_token_time: Optional[float] = None
