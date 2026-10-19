@@ -818,7 +818,7 @@ def create_app() -> FastAPI:
 
         sched_session = SchedSession(
             session_id=session_id,
-            model_tag=req.model,
+            model_tag=loaded_model.tag,
             prompt=prompt,
             max_tokens=req.max_tokens,
             temperature=req.temperature,

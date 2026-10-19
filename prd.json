@@ -963,6 +963,22 @@
         "Provide actionable diag commands in Web UI when 0 response tokens arrive",
         "100% test pass rate across all 214 tests in test suite"
       ]
+    },
+    {
+      "id": "US-074",
+      "title": "Terminal LLM Run Hardening, Canonical Model Tag Scheduling Alignment, and Infallible Standalone Fallback",
+      "phase": 11,
+      "description": "Align SchedSession.model_tag with canonical resident loaded_model.tag in app.py and TokenRoundRobinScheduler to eliminate 0-token stalling in continuous batching; harden ModelRegistry auto-discovery in _run_standalone; provide immediate visual progress feedback ('[LLMHub] Thinking...') in interactive REPL chat; and implement seamless standalone fallback in cmd_run if the local HTTP daemon fails or emits 0 tokens.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Normalize SchedSession.model_tag to loaded_model.tag in /v1/chat/completions",
+        "Support alias model tag matching in TokenRoundRobinScheduler._step_continuous_batch and submit_session",
+        "Add automatic ModelRegistry local scanning in _run_standalone to resolve shorthand model tags offline without server",
+        "Provide immediate visual feedback in ModelRunner.chat_repl and CLI HTTP client before first token arrives",
+        "Implement automatic seamless fallback from HTTP daemon to direct standalone execution in cmd_run if server returns 0 tokens or fails",
+        "100% test pass rate across all 217 tests in test suite"
+      ]
     }
   ]
 }
+

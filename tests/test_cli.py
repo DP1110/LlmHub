@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 import pytest
 from llmhub.cli import build_parser, cmd_list
 from llmhub.config import LLMHubConfig
@@ -127,5 +128,50 @@ def test_cli_diag_execution(capsys, monkeypatch):
     assert "LLMHUB SYSTEM & RUNTIME DIAGNOSTIC INSPECTOR" in captured.out
     assert "Operating System" in captured.out
     assert "Registered Models" in captured.out
+
+def test_cmd_run_fallback_on_empty_server_response(capsys, monkeypatch):
+    from llmhub.cli import cmd_run
+    parser = build_parser()
+    args = parser.parse_args(["run", "smollm2:135m", "-p", "hello"])
+
+    # Mock client to pretend server is running
+    monkeypatch.setattr("llmhub.cli.LLMHubClient.is_server_running", lambda self: True)
+    # Mock _run_via_http to return False (0 tokens or error)
+    monkeypatch.setattr("llmhub.cli._run_via_http", lambda client, args: False)
+    standalone_called = []
+    monkeypatch.setattr("llmhub.cli._run_standalone", lambda config, args: standalone_called.append(True))
+
+    cmd_run(args)
+    captured = capsys.readouterr()
+    assert "Switching to direct standalone execution" in captured.out
+    assert len(standalone_called) == 1
+
+def test_run_via_http_returns_false_on_empty_tokens():
+    from llmhub.cli import _run_via_http
+    parser = build_parser()
+    args = parser.parse_args(["run", "smollm2:135m", "-p", "hello"])
+
+    mock_client = MagicMock()
+    mock_client.stream_chat.return_value = []  # 0 tokens
+    success = _run_via_http(mock_client, args)
+    assert success is False
+
+def test_run_via_http_keyboard_interrupt_does_not_trigger_fallback(capsys):
+    from llmhub.cli import _run_via_http
+    parser = build_parser()
+    args = parser.parse_args(["run", "smollm2:135m", "-p", "hello"])
+
+    def raise_interrupt(*a, **kw):
+        raise KeyboardInterrupt()
+
+    mock_client = MagicMock()
+    mock_client.stream_chat.side_effect = raise_interrupt
+    success = _run_via_http(mock_client, args)
+    # Must return True so fallback is aborted upon explicit user Ctrl+C
+    assert success is True
+    captured = capsys.readouterr()
+    assert "Interrupted" in captured.err or "Interrupted" in captured.out
+
+
 
 

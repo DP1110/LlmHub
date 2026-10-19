@@ -711,6 +711,10 @@ class ModelRunner:
             sys.stdout.write("\n")
             assistant_response = ""
             last_stats = {}
+            is_tty = sys.stdout.isatty()
+            if is_tty:
+                sys.stderr.write("[LLMHub] Thinking...")
+                sys.stderr.flush()
 
             for chunk in self.stream_completion(
                 prompt=formatted_prompt,
@@ -718,10 +722,19 @@ class ModelRunner:
                 temperature=temperature
             ):
                 if not chunk["done"]:
+                    if first_token:
+                        if is_tty:
+                            sys.stderr.write("\r" + " " * 40 + "\r")
+                            sys.stderr.flush()
+                        first_token = False
                     sys.stdout.write(chunk["token"])
                     sys.stdout.flush()
                     assistant_response += chunk["token"]
                 last_stats = chunk
+
+            if first_token and is_tty:
+                sys.stderr.write("\r" + " " * 40 + "\r")
+                sys.stderr.flush()
 
             sys.stdout.write("\n\n")
             if last_stats:

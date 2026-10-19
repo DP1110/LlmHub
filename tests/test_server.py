@@ -498,6 +498,108 @@ def test_run_server_force_reclaims_port(monkeypatch, tmp_path):
     assert calls["uvicorn_ran"] is True
 
 
+def test_chat_completions_alias_normalized_to_canonical_tag(client, monkeypatch):
+    """Verify that shorthand alias model requests normalize to canonical resident model tag in scheduler."""
+    loaded_mock = LoadedModel(
+        tag="canonical/SmolLM2-135M-Instruct-GGUF:q4_k_m",
+        file_path=Path("dummy.gguf"),
+        metadata=None,
+        template_engine=ChatTemplateEngine(None),
+        n_ctx=2048,
+        n_threads=4,
+        backend=MockBackend(),
+        weights_bytes=100 * 1024 * 1024,
+        kv_cache_bytes=20 * 1024 * 1024,
+        overhead_bytes=5 * 1024 * 1024,
+        total_memory_bytes=125 * 1024 * 1024,
+        pinned=False,
+    )
+    loaded_mock.batch_engine = None
+
+    async def mock_get_or_load(spec, **kw):
+        return loaded_mock
+
+    monkeypatch.setattr(state.model_manager, "get_or_load_model", mock_get_or_load)
+    monkeypatch.setattr(state.model_manager, "get_model", lambda s: loaded_mock)
+
+    submitted_sessions = []
+    async def mock_submit(s):
+        submitted_sessions.append(s)
+        await s.token_queue.put({"delta": "Hello", "done": False})
+        await s.token_queue.put({"done": True, "stop_reason": "stop", "usage": {"completion_tokens": 1}})
+
+    monkeypatch.setattr(state.scheduler, "submit_session", mock_submit)
+
+    payload = {
+        "model": "smollm2:135m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    }
+    resp = client.post("/v1/chat/completions", json=payload)
+    assert resp.status_code == 200
+    assert len(submitted_sessions) == 1
+    # Verify model_tag was normalized to canonical resident tag
+    assert submitted_sessions[0].model_tag == "canonical/SmolLM2-135M-Instruct-GGUF:q4_k_m"
+
+
+def test_scheduler_alias_canonicalization_and_continuous_batch():
+    import asyncio
+    from llmhub.scheduler.scheduler import TokenRoundRobinScheduler
+    from llmhub.scheduler.session import SchedSession
+    from llmhub.server.model_manager import LoadedModel
+    from llmhub.batch.engine import ContinuousBatchEngine
+
+    async def _test():
+        loaded = LoadedModel(
+            tag="org/smollm2:q4_k_m",
+            file_path=Path("dummy.gguf"),
+            metadata=None,
+            template_engine=ChatTemplateEngine(None),
+            n_ctx=2048,
+            n_threads=4,
+            backend=MockBackend(),
+            weights_bytes=100 * 1024 * 1024,
+            kv_cache_bytes=20 * 1024 * 1024,
+            overhead_bytes=5 * 1024 * 1024,
+            total_memory_bytes=125 * 1024 * 1024,
+            pinned=False,
+        )
+        loaded.batch_engine = ContinuousBatchEngine(model_tag=loaded.tag, max_slots=2)
+
+        mock_mm = MagicMock()
+        mock_mm.get_model = lambda tag: loaded if "smollm2" in tag else None
+
+        scheduler = TokenRoundRobinScheduler(model_manager=mock_mm, enable_continuous_batching=True)
+
+        # Submit session with alias "smollm2:135m"
+        session = SchedSession(
+            session_id="s1",
+            model_tag="smollm2:135m",
+            prompt="hello",
+        )
+        await scheduler.submit_session(session)
+
+        # Verify submit_session canonicalized model_tag to loaded.tag
+        assert session.model_tag == "org/smollm2:q4_k_m"
+
+        # Test un-canonicalized session stepping in _step_continuous_batch directly
+        session2 = SchedSession(
+            session_id="s2",
+            model_tag="smollm2:other-alias",
+            prompt="hello 2",
+        )
+        scheduler.runnable_queue.append(session2)
+
+        # Stepping continuous batch should match and canonicalize session2
+        stepped = await scheduler._step_continuous_batch(loaded, session2)
+        assert stepped is True
+        assert session2.model_tag == "org/smollm2:q4_k_m"
+
+    asyncio.run(_test())
+
+
+
+
 
 
 

@@ -148,10 +148,15 @@ class TokenRoundRobinScheduler:
 
         # 1. Gather all runnable sessions targeting this model
         async with self.lock:
-            model_sessions = [
-                s for s in self.runnable_queue
-                if s.model_tag == loaded_model.tag and not s.is_done and not s.cancelled
-            ]
+            model_sessions = []
+            for s in self.runnable_queue:
+                if s.is_done or s.cancelled:
+                    continue
+                if s.model_tag == loaded_model.tag:
+                    model_sessions.append(s)
+                elif hasattr(self.model_manager, "get_model") and self.model_manager.get_model(s.model_tag) == loaded_model:
+                    s.model_tag = loaded_model.tag  # Canonicalize once to eliminate redundant queries
+                    model_sessions.append(s)
 
         if not model_sessions:
             return False
@@ -358,6 +363,12 @@ class TokenRoundRobinScheduler:
             session.metrics.enqueue_time = time.monotonic()
             session.phase = SessionPhase.WAITING
 
+            # Normalize alias model_tag to canonical loaded model tag if model is resident
+            if hasattr(self.model_manager, "get_model"):
+                lm = self.model_manager.get_model(session.model_tag)
+                if lm and lm.tag:
+                    session.model_tag = lm.tag
+
             if self.enable_fair_share:
                 self.fair_share.register_session_admission(session, session.tenant_id)
 
@@ -448,6 +459,7 @@ class TokenRoundRobinScheduler:
             # Trigger load if dynamic load required
             try:
                 loaded_model = await self.model_manager.get_or_load_model(session.model_tag)
+                session.model_tag = loaded_model.tag
             except Exception as e:
                 session.phase = SessionPhase.FAILED
                 session.error = str(e)
@@ -455,6 +467,8 @@ class TokenRoundRobinScheduler:
                 await session.token_queue.put({"done": True, "error": str(e)})
                 await self._cleanup_session_resources(session)
                 return True
+        elif session.model_tag != loaded_model.tag:
+            session.model_tag = loaded_model.tag
 
         # Check if Continuous Batching is enabled and supported for this model (skip for speculative requests)
         is_speculative = session.use_speculative and bool(session.draft_model_tag)

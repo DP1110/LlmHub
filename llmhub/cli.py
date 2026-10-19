@@ -128,7 +128,8 @@ def cmd_show(args: argparse.Namespace) -> None:
     print(f" Analysis:            {bandwidth.explanation}")
     print("=" * 75 + "\n")
 
-def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
+def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> bool:
+    is_tty = sys.stdout.isatty()
     if args.prompt:
         messages = []
         if args.system:
@@ -138,8 +139,9 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
         last_usage = {}
         total_tokens = 0
         first_token = True
-        sys.stdout.write("[LLMHub] Processing prompt on model runtime...")
-        sys.stdout.flush()
+        if is_tty:
+            sys.stderr.write("[LLMHub] Processing prompt on model runtime...")
+            sys.stderr.flush()
         try:
             for chunk in client.stream_chat(
                 model=args.model,
@@ -150,7 +152,9 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
                 token_text = chunk.get("token", "")
                 if token_text:
                     if first_token:
-                        sys.stdout.write("\r" + " " * 50 + "\r" if sys.stdout.isatty() else "\n")
+                        if is_tty:
+                            sys.stderr.write("\r" + " " * 50 + "\r")
+                            sys.stderr.flush()
                         first_token = False
                     sys.stdout.write(token_text)
                     sys.stdout.flush()
@@ -158,21 +162,34 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
                 if chunk.get("usage"):
                     last_usage = chunk["usage"]
         except KeyboardInterrupt:
-            sys.stdout.write("\n[Interrupted]")
+            if is_tty:
+                sys.stderr.write("\n[Interrupted]\n")
+            else:
+                sys.stderr.write("[Interrupted]\n")
+            return True  # User intentionally aborted; do not trigger fallback
+        except Exception as e:
+            if first_token and is_tty:
+                sys.stderr.write("\r" + " " * 50 + "\r")
+                sys.stderr.flush()
+            sys.stderr.write(f"\n[ERROR] Server inference error: {e}\n")
+            return False
 
-        if first_token:
-            sys.stdout.write("\r" + " " * 50 + "\r" if sys.stdout.isatty() else "\n")
+        if first_token and is_tty:
+            sys.stderr.write("\r" + " " * 50 + "\r")
+            sys.stderr.flush()
 
         sys.stdout.write("\n\n")
         comp_tokens = last_usage.get('completion_tokens', total_tokens) if last_usage else total_tokens
         if comp_tokens == 0:
-            sys.stdout.write("(No response tokens received from server. Run 'llmhub diag' or check server logs.)\n")
+            sys.stdout.write("(No response tokens received from server.)\n")
+            return False
         elif last_usage:
             sys.stdout.write(
                 f"[{comp_tokens} tokens | "
                 f"TTFT: {last_usage.get('ttft_ms', 0):.1f}ms | "
                 f"Speed: {last_usage.get('decode_tok_s', 0):.1f} tok/s]\n"
             )
+        return True
     else:
         print("=" * 65)
         print(f" LLMHub Interactive Chat Client (Connected to HTTP Daemon)")
@@ -204,6 +221,10 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
 
             bot_reply = ""
             last_usage = {}
+            first_token = True
+            if is_tty:
+                sys.stderr.write("[LLMHub] Thinking...")
+                sys.stderr.flush()
             try:
                 for chunk in client.stream_chat(
                     model=args.model,
@@ -213,13 +234,28 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
                 ):
                     token_text = chunk.get("token", "")
                     if token_text:
+                        if first_token:
+                            if is_tty:
+                                sys.stderr.write("\r" + " " * 40 + "\r")
+                                sys.stderr.flush()
+                            first_token = False
                         sys.stdout.write(token_text)
                         sys.stdout.flush()
                         bot_reply += token_text
                     if chunk.get("usage"):
                         last_usage = chunk["usage"]
             except KeyboardInterrupt:
-                sys.stdout.write("\n[Interrupted]")
+                sys.stdout.write("\n[Interrupted]\n")
+            except Exception as e:
+                if first_token and is_tty:
+                    sys.stderr.write("\r" + " " * 40 + "\r")
+                    sys.stderr.flush()
+                sys.stderr.write(f"\n[ERROR] Server error: {e}\n")
+                continue
+
+            if first_token and is_tty:
+                sys.stderr.write("\r" + " " * 40 + "\r")
+                sys.stderr.flush()
 
             sys.stdout.write("\n")
             if last_usage:
@@ -229,9 +265,14 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
                     f"Speed: {last_usage.get('decode_tok_s', 0):.1f} tok/s]\n"
                 )
             history.append({"role": "assistant", "content": bot_reply})
+        return True
 
 def _run_standalone(config: LLMHubConfig, args: argparse.Namespace) -> None:
     registry = ModelRegistry(config.db_path)
+    try:
+        registry.scan_and_register_local_models(config.models_dir)
+    except Exception:
+        pass
     record = registry.find_model(args.model)
 
     if not record:
@@ -265,15 +306,29 @@ def _run_standalone(config: LLMHubConfig, args: argparse.Namespace) -> None:
         formatted = runner.template_engine.render(messages, add_generation_prompt=True)
 
         last_chunk = {}
+        first_token = True
+        is_tty = sys.stdout.isatty()
+        if is_tty:
+            sys.stderr.write("[LLMHub] Initializing model runtime...")
+            sys.stderr.flush()
         for chunk in runner.stream_completion(
             prompt=formatted,
             max_tokens=args.max_tokens,
             temperature=args.temperature
         ):
             if not chunk["done"]:
+                if first_token:
+                    if is_tty:
+                        sys.stderr.write("\r" + " " * 45 + "\r")
+                        sys.stderr.flush()
+                    first_token = False
                 sys.stdout.write(chunk["token"])
                 sys.stdout.flush()
             last_chunk = chunk
+
+        if first_token and is_tty:
+            sys.stderr.write("\r" + " " * 45 + "\r")
+            sys.stderr.flush()
 
         sys.stdout.write("\n\n")
         if last_chunk:
@@ -309,10 +364,23 @@ def cmd_run(args: argparse.Namespace) -> None:
         sys.stdout.write(f"[INFO] Server not detected at http://{host}:{port}. Running in standalone mode.\n")
         sys.stdout.write(f"       (Tip: run 'llmhub serve' to enable HTTP/OpenAI API daemon)\n\n")
 
+    def _execute_standalone() -> None:
+        try:
+            _run_standalone(config, args)
+        except KeyboardInterrupt:
+            sys.stderr.write("\n[Interrupted]\n")
+            sys.exit(130)
+        except Exception as e:
+            sys.stderr.write(f"\n[ERROR] Standalone execution failed: {e}\n")
+            sys.exit(1)
+
     if use_http:
-        _run_via_http(client, args)
+        success = _run_via_http(client, args)
+        if not success:
+            sys.stdout.write("[WARNING] Local daemon returned 0 tokens or failed. Switching to direct standalone execution...\n\n")
+            _execute_standalone()
     else:
-        _run_standalone(config, args)
+        _execute_standalone()
 
 def cmd_serve(args: argparse.Namespace) -> None:
     try:
