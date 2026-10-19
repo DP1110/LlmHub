@@ -67,3 +67,65 @@ def test_cli_models_and_ls_aliases(capsys):
     captured = capsys.readouterr()
     assert "No models found" in captured.out or "TAG" in captured.out
 
+def test_cli_stop_and_diag_parser(capsys):
+    from llmhub.cli import cmd_stop, cmd_diag
+    parser = build_parser()
+
+    # serve --force
+    args_serve = parser.parse_args(["serve", "--force"])
+    assert args_serve.force is True
+
+    # stop
+    args_stop = parser.parse_args(["stop"])
+    assert args_stop.func == cmd_stop
+
+    # diag & aliases
+    for alias in ["diag", "debug", "test"]:
+        args_d = parser.parse_args([alias])
+        assert args_d.func == cmd_diag
+        assert args_d.model is None
+
+    args_dm = parser.parse_args(["diag", "smollm2:135m"])
+    assert args_dm.model == "smollm2:135m"
+
+def test_cli_stop_execution(capsys, monkeypatch, tmp_path):
+    from llmhub.cli import cmd_stop
+    from llmhub.config import LLMHubConfig
+    from llmhub.core.lifecycle import PIDManager
+    parser = build_parser()
+    args = parser.parse_args(["stop"])
+
+    cfg = LLMHubConfig(base_dir=tmp_path)
+    monkeypatch.setattr("llmhub.cli.LLMHubConfig", lambda: cfg)
+    pid_mgr = PIDManager(cfg.run_dir)
+    pid_mgr.run_dir.mkdir(parents=True, exist_ok=True)
+    import json
+    pid_data = {
+        "pid": 999999,
+        "host": "127.0.0.1",
+        "port": 11434,
+        "version": "1.0.0",
+        "started_at": "2026-10-20T00:00:00Z"
+    }
+    pid_mgr.pid_file.write_text(json.dumps(pid_data))
+    assert pid_mgr.pid_file.exists()
+
+    # Mock PIDManager and port check
+    monkeypatch.setattr("llmhub.server.server.is_port_in_use", lambda port, host: False)
+    cmd_stop(args)
+    captured = capsys.readouterr()
+    assert "stopped successfully" in captured.out
+    assert not pid_mgr.pid_file.exists()
+
+def test_cli_diag_execution(capsys, monkeypatch):
+    from llmhub.cli import cmd_diag
+    parser = build_parser()
+    args = parser.parse_args(["diag"])
+
+    cmd_diag(args)
+    captured = capsys.readouterr()
+    assert "LLMHUB SYSTEM & RUNTIME DIAGNOSTIC INSPECTOR" in captured.out
+    assert "Operating System" in captured.out
+    assert "Registered Models" in captured.out
+
+

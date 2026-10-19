@@ -1133,13 +1133,16 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
             assert "This is a response." in "".join(c["token"] for c in chunks)
 
 
-def test_is_runnable_accepts_help_output_and_rejects_linker_errors(tmp_path: Path) -> None:
+def test_is_runnable_accepts_help_output_and_rejects_linker_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure is_runnable accepts exit code 0 or usage help text, but rejects CANNOT LINK EXECUTABLE."""
     from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
     import subprocess
 
     dummy_path = tmp_path / "fake_model.gguf"
     dummy_path.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
 
     # Dynamic linker error
     with patch("subprocess.run") as mock_run:

@@ -1408,13 +1408,18 @@
           `;
         } else if (!streamedText) {
           contentElem.innerHTML = `
-            <div style="color:var(--text-muted); font-size:0.85rem; font-style:italic;">
-              (No response tokens received from model runtime. If running in Termux, check server terminal output or run <code>llmhub termux</code> for hardware diagnostics.)
+            <div style="background:rgba(234, 179, 8, 0.08); border:1px solid rgba(234, 179, 8, 0.25); border-radius:8px; padding:12px; color:#fbbf24; font-size:0.85rem; line-height:1.4;">
+              <div style="font-weight:600; margin-bottom:4px;">⚠️ No response tokens received from model runtime</div>
+              <div style="color:var(--text-muted); font-size:0.8rem; margin-bottom:6px;">If running on Termux, test the model directly in terminal with:</div>
+              <code style="display:inline-block; padding:3px 6px; background:#18181b; border-radius:4px; color:#fff; font-size:0.8rem;">llmhub diag ${escapeHtml(model)}</code>
+              <div style="color:var(--text-muted); font-size:0.8rem; margin-top:6px;">Or restart the server daemon cleanly: <code style="padding:2px 5px; background:#18181b; border-radius:4px; color:#fff; font-size:0.78rem;">llmhub stop && llmhub serve --low-mem</code></div>
             </div>
           `;
         }
 
-        chatHistory.push({ role: 'assistant', content: streamedText });
+        if (streamedText.trim()) {
+          chatHistory.push({ role: 'assistant', content: streamedText });
+        }
       } catch (err) {
         if (err.name === 'AbortError') {
           contentElem.textContent += ' [Generation stopped]';

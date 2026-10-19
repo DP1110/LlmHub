@@ -278,7 +278,11 @@ class LlamaCppBackend(Backend):
                         if clean_prompt and clean_prompt in initial_buffer:
                             prompt_stripped = True
                             remainder = initial_buffer.split(clean_prompt, 1)[1]
-                            buffer = remainder.lstrip("\r\n >\t")
+                            hdr_rem = strip_assistant_header(remainder)
+                            if hdr_rem is not None:
+                                buffer = hdr_rem
+                            else:
+                                buffer = remainder.lstrip("\r\n >\t")
                             accumulated_output = buffer
                             initial_buffer = ""
                             continue
@@ -292,51 +296,27 @@ class LlamaCppBackend(Backend):
                         if clean_prompt and clean_prompt.startswith(cand):
                             continue
 
-                        # 3. Check if clean_prompt start appears after some banner or menu
+                        # 4. Check if clean_prompt start appears after some banner or menu
                         prompt_head = clean_prompt[:min(30, len(clean_prompt))] if clean_prompt else ""
                         if prompt_head and prompt_head in initial_buffer:
                             initial_buffer = initial_buffer[initial_buffer.find(prompt_head):]
                             continue
 
-                        # 4. If candidate matches a known banner or leader, continue buffering
+                        # 5. If candidate matches a known banner, continue buffering up to 256 bytes
                         known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob")
-                        is_leader = initial_buffer.lstrip("\r\n \t").startswith(">")
-                        is_banner = is_leader or any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
-                        if is_banner:
-                            if len(initial_buffer) > len(clean_prompt) + 512 or len(initial_buffer) > 1024:
-                                prompt_stripped = True
-                                hdr_b = strip_assistant_header(initial_buffer)
-                                if hdr_b is not None:
-                                    buffer = hdr_b
-                                    accumulated_output = hdr_b
-                                else:
-                                    buffer = initial_buffer
-                                    accumulated_output = initial_buffer
-                                initial_buffer = ""
+                        is_banner = any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
+                        if is_banner and len(initial_buffer) < 256:
                             continue
 
-                        # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
+                        # 6. Diverged from prompt prefix and not a banner: output is genuine generated text
                         prompt_stripped = True
                         hdr_div = strip_assistant_header(initial_buffer)
                         if hdr_div is not None:
                             buffer = hdr_div
                             accumulated_output = hdr_div
                         else:
-                            last_stop_pos = -1
-                            last_stop_len = 0
-                            if stop:
-                                for s in stop:
-                                    pos = initial_buffer.rfind(s)
-                                    if pos != -1 and pos >= last_stop_pos:
-                                        last_stop_pos = pos
-                                        last_stop_len = len(s)
-                            if last_stop_pos != -1:
-                                tail = initial_buffer[last_stop_pos + last_stop_len:].lstrip("\r\n >\t")
-                                buffer = tail
-                                accumulated_output = tail
-                            else:
-                                buffer = initial_buffer.lstrip("\r\n >\t")
-                                accumulated_output = buffer
+                            buffer = initial_buffer.lstrip("\r\n >\t")
+                            accumulated_output = buffer
                         initial_buffer = ""
                     else:
                         buffer += char
@@ -433,6 +413,14 @@ class LlamaCppBackend(Backend):
                     f"Native llama-cli failed (exit code {rc}{extra_hint}).\n"
                     f"Tokens yielded before crash: {tokens_yielded}\n"
                     f"Details:\n{err_text or 'No stderr'}"
+                )
+            elif isinstance(rc, int) and rc == 0 and tokens_yielded == 0 and not hit_stop:
+                err_text = "".join(stderr_chunks).strip()
+                import logging
+                logging.getLogger("llmhub.server.llamacpp").warning(
+                    "Native llama-cli finished with exit code 0 but yielded 0 tokens.\nCommand: %s\nStderr: %s",
+                    " ".join(cmd),
+                    err_text or "No stderr"
                 )
 
         return _gen(), proc

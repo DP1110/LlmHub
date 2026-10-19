@@ -945,6 +945,24 @@
         "Ensure non-zero subprocess returncodes surface descriptive RuntimeError diagnostics without false positives on legitimate stop terminations",
         "100% test pass rate across all 209 tests in test suite"
       ]
+    },
+    {
+      "id": "US-073",
+      "title": "Port 11434 Collision Reclamation, Native Subprocess Output Streaming Hardening, and Diagnostic Inspector",
+      "phase": 11,
+      "description": "Eliminate [Errno 98] address already in use errors via is_port_in_use detection, graceful healthy-server notifications, and --force process reclamation; eliminate terminal output freezing by printing immediate feedback during prompt processing; add 'llmhub stop' and 'llmhub diag' subcommands for one-command server lifecycle management and runtime verification.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Implement is_port_in_use and kill_process_on_port in server.py",
+        "Gracefully detect existing healthy server on port 11434 with clear URLs and clean exit code 0",
+        "Support 'llmhub serve --force' to terminate stale processes and re-bind port 11434",
+        "Add 'llmhub stop' subcommand to cleanly terminate server daemon and free port 11434",
+        "Add 'llmhub diag' subcommand to inspect hardware, thermals, native llama.cpp binaries, registered models, and run quick 5-token execution tests",
+        "Display '[LLMHub] Processing prompt on model runtime...' in CLI HTTP client to eliminate frozen cursor perception",
+        "Harden prompt stripping and leader matching in ModelRunner and LlamaCppBackend to prevent token swallowing",
+        "Provide actionable diag commands in Web UI when 0 response tokens arrive",
+        "100% test pass rate across all 214 tests in test suite"
+      ]
     }
   ]
 }

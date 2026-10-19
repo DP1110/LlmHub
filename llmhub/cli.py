@@ -136,6 +136,10 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
         messages.append({"role": "user", "content": args.prompt})
 
         last_usage = {}
+        total_tokens = 0
+        first_token = True
+        sys.stdout.write("[LLMHub] Processing prompt on model runtime...")
+        sys.stdout.flush()
         try:
             for chunk in client.stream_chat(
                 model=args.model,
@@ -145,17 +149,27 @@ def _run_via_http(client: LLMHubClient, args: argparse.Namespace) -> None:
             ):
                 token_text = chunk.get("token", "")
                 if token_text:
+                    if first_token:
+                        sys.stdout.write("\r" + " " * 50 + "\r" if sys.stdout.isatty() else "\n")
+                        first_token = False
                     sys.stdout.write(token_text)
                     sys.stdout.flush()
+                    total_tokens += 1
                 if chunk.get("usage"):
                     last_usage = chunk["usage"]
         except KeyboardInterrupt:
             sys.stdout.write("\n[Interrupted]")
 
+        if first_token:
+            sys.stdout.write("\r" + " " * 50 + "\r" if sys.stdout.isatty() else "\n")
+
         sys.stdout.write("\n\n")
-        if last_usage:
+        comp_tokens = last_usage.get('completion_tokens', total_tokens) if last_usage else total_tokens
+        if comp_tokens == 0:
+            sys.stdout.write("(No response tokens received from server. Run 'llmhub diag' or check server logs.)\n")
+        elif last_usage:
             sys.stdout.write(
-                f"[{last_usage.get('completion_tokens', 0)} tokens | "
+                f"[{comp_tokens} tokens | "
                 f"TTFT: {last_usage.get('ttft_ms', 0):.1f}ms | "
                 f"Speed: {last_usage.get('decode_tok_s', 0):.1f} tok/s]\n"
             )
@@ -316,7 +330,9 @@ def cmd_serve(args: argparse.Namespace) -> None:
     server_cfg = config.settings.get("server", {})
     host = args.host or server_cfg.get("host", "127.0.0.1")
     port = args.port or server_cfg.get("port", 11434)
-    run_server(host=host, port=port, config=config)
+    force = getattr(args, "force", False)
+    log_level = getattr(args, "log_level", None)
+    run_server(host=host, port=port, config=config, force=force, log_level=log_level)
 
 def cmd_ps(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
@@ -650,6 +666,171 @@ def cmd_status(args: argparse.Namespace) -> None:
         print(" HTTP Health:        OFFLINE")
     print("=" * 75 + "\n")
 
+def cmd_stop(args: argparse.Namespace) -> None:
+    """Stop any active LLMHub server daemon and cleanly reclaim port 11434."""
+    config = LLMHubConfig()
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+
+    stopped = False
+    from llmhub.core.lifecycle import PIDManager
+    pid_mgr = PIDManager(config.run_dir)
+    pid_info = pid_mgr.read_pid_info()
+
+    # 1. Kill by PID file
+    if pid_info and pid_info.get("pid"):
+        old_pid = pid_info["pid"]
+        try:
+            import psutil
+            if psutil.pid_exists(old_pid) and old_pid != os.getpid():
+                proc = psutil.Process(old_pid)
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+                stopped = True
+        except Exception:
+            pass
+        pid_mgr.release(force=True)
+
+    # 2. Kill by port
+    from llmhub.server.server import is_port_in_use, kill_process_on_port
+    if is_port_in_use(port, host):
+        if kill_process_on_port(port):
+            stopped = True
+
+    # 3. Clean up run directory
+    pid_mgr.cleanup_run_dir()
+    pid_mgr.release(force=True)
+
+    # Bounded wait for port cleanup
+    deadline = time.perf_counter() + 2.0
+    while time.perf_counter() < deadline and is_port_in_use(port, host):
+        time.sleep(0.15)
+
+    if stopped or not is_port_in_use(port, host):
+        print(f"[+] LLMHub server daemon on port {port} stopped successfully.")
+    else:
+        print(f"[!] Could not confirm server stop on port {port}. Run 'pkill -f llmhub' if needed.")
+
+def cmd_diag(args: argparse.Namespace) -> None:
+    """Perform comprehensive hardware, native runtime, and model execution diagnostics."""
+    config = LLMHubConfig()
+    print("=" * 75)
+    print(" LLMHUB SYSTEM & RUNTIME DIAGNOSTIC INSPECTOR")
+    print("=" * 75)
+
+    # 1. Environment & Hardware
+    import platform
+    print(f" Operating System:    {platform.system()} {platform.machine()} ({platform.platform()})")
+    print(f" Python Executable:   {sys.executable} (Python {sys.version.split()[0]})")
+    from llmhub.config import is_termux
+    print(f" Termux Environment:  {'YES (Android ARM64)' if is_termux() else 'NO'}")
+
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        print(f" System RAM:          {vm.available / (1024**2):.1f} MB free / {vm.total / (1024**2):.1f} MB total ({vm.percent}% used)")
+    except Exception:
+        pass
+
+    # 2. Server & Port Status
+    server_cfg = config.settings.get("server", {})
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 11434)
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
+    from llmhub.server.server import is_port_in_use
+    port_bound = is_port_in_use(port, host)
+    print(f" Port {port}:          {'BOUND / LISTENING' if port_bound else 'AVAILABLE'}")
+    if port_bound:
+        try:
+            import httpx
+            with httpx.Client(timeout=2.0) as client:
+                r = client.get(f"http://{probe_host}:{port}/healthz")
+                if r.status_code == 200:
+                    hz = r.json()
+                    print(f" Server HTTP Health:  HEALTHY (Uptime: {hz.get('uptime_seconds', 0.0):.1f}s)")
+                else:
+                    print(f" Server HTTP Health:  HTTP {r.status_code}")
+        except Exception as e:
+            print(f" Server HTTP Health:  UNRESPONSIVE ({e})")
+
+    # 3. Native Inference Binaries
+    print("-" * 75)
+    from llmhub.core.runner import get_cli_supported_flags
+    import shutil
+    candidates = ["llama-completion", "llama-cli", "llama", "llama-run"]
+    found_binaries = []
+    for c in candidates:
+        w = shutil.which(c)
+        if w:
+            found_binaries.append((c, w))
+
+    termux_bins = [
+        Path("/data/data/com.termux/files/usr/bin/llama-completion"),
+        Path("/data/data/com.termux/files/usr/bin/llama-cli"),
+        Path.home() / "llama.cpp" / "build" / "bin" / "llama-completion",
+        Path.home() / "llama.cpp" / "build" / "bin" / "llama-cli",
+    ]
+    for tb in termux_bins:
+        if tb.is_file() and str(tb) not in [w for _, w in found_binaries]:
+            found_binaries.append((tb.name, str(tb)))
+
+    print(" Native Inference Binaries:")
+    if not found_binaries:
+        print("   [!] No native llama.cpp binaries discovered in PATH or standard Termux locations.")
+    else:
+        for name, path in found_binaries:
+            flags = get_cli_supported_flags(path)
+            flags_str = ", ".join(sorted([f for f in flags if f in ("-st", "--single-turn", "-no-cnv", "--no-conversation", "--no-display-prompt", "--log-disable", "--special")]))
+            print(f"   * {name}: {path}")
+            print(f"     Key Flags: {flags_str or 'standard defaults'}")
+
+    # 4. Model Registry & Verification
+    print("-" * 75)
+    registry = ModelRegistry(config.db_path)
+    models = registry.list_models()
+    print(f" Registered Models:    {len(models)}")
+    for m in models:
+        exists = Path(m.file_path).is_file()
+        sz_mb = m.size_bytes / (1024**2)
+        print(f"   - {m.tag} ({sz_mb:.1f} MB) -> File exists: {exists}")
+
+    # 5. Quick Test Generation
+    target_model = getattr(args, "model", None)
+    if not target_model:
+        if models:
+            target_model = models[0].tag
+        else:
+            target_model = "smollm2:135m"
+
+    print("-" * 75)
+    print(f" Execution Test on '{target_model}':")
+    record = registry.find_model(target_model)
+    if not record or not Path(record.file_path).is_file():
+        print(f"   [!] Model '{target_model}' not downloaded. Pull it with: llmhub pull {target_model}")
+    else:
+        model_file = Path(record.file_path)
+        print(f"   Model File: {model_file} ({model_file.stat().st_size / (1024**2):.1f} MB)")
+        try:
+            from llmhub.core.runner import ModelRunner
+            t0 = time.perf_counter()
+            with ModelRunner(model_path=model_file, n_ctx=512, n_threads=2) as runner:
+                gen = runner.stream_completion(prompt="Hello", max_tokens=5, temperature=0.7)
+                tokens = []
+                for chunk in gen:
+                    if not chunk["done"] and chunk.get("token"):
+                        tokens.append(chunk["token"])
+                elapsed = time.perf_counter() - t0
+                output_text = "".join(tokens).strip()
+                print(f"   [PASS] Generated {len(tokens)} token chunks in {elapsed:.2f}s: {repr(output_text)}")
+        except Exception as e:
+            print(f"   [FAIL] Model execution test failed: {e}")
+
+    print("=" * 75 + "\n")
+
 def cmd_cluster(args: argparse.Namespace) -> None:
     config = LLMHubConfig()
     server_cfg = config.settings.get("server", {})
@@ -831,9 +1012,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = subparsers.add_parser("serve", aliases=["server"], help="Start the LLMHub HTTP API server daemon")
     p_serve.add_argument("--host", default=None, help="Bind host (default: 127.0.0.1)")
     p_serve.add_argument("--port", type=int, default=None, help="Bind port (default: 11434)")
+    p_serve.add_argument("--force", action="store_true", help="Force restart by reclaiming port 11434 if occupied")
     p_serve.add_argument("--low-mem", action="store_true", help="Start server in low-memory mode")
     p_serve.add_argument("--log-level", default=None, help="Log level (DEBUG, INFO, WARNING, ERROR)")
     p_serve.set_defaults(func=cmd_serve)
+
+    # stop
+    p_stop = subparsers.add_parser("stop", help="Stop running LLMHub server daemon and free port 11434")
+    p_stop.set_defaults(func=cmd_stop)
+
+    # diag
+    p_diag = subparsers.add_parser("diag", aliases=["debug", "test"], help="Run full system and model runtime diagnostic inspector")
+    p_diag.add_argument("model", nargs="?", default=None, help="Optional model to test (defaults to first available or smollm2:135m)")
+    p_diag.set_defaults(func=cmd_diag)
 
     # termux
     p_termux = subparsers.add_parser("termux", help="Inspect Termux/mobile environment, thermals, and memory pressure")

@@ -411,4 +411,93 @@ def test_api_models_includes_resident_and_scanned(client):
         state.model_manager.loaded_models.pop("mock-resident-only", None)
 
 
+def test_is_port_in_use_and_kill_process_on_port():
+    from llmhub.server.server import is_port_in_use, kill_process_on_port
+    import socket
+
+    # Test with unbound port
+    assert not is_port_in_use(59998)
+    assert not is_port_in_use(59998, host="0.0.0.0")
+
+    # Test with bound port
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 59998))
+    s.listen(5)
+    try:
+        assert is_port_in_use(59998)
+        # Verify 0.0.0.0 normalizes to 127.0.0.1 safely on all platforms
+        assert is_port_in_use(59998, host="0.0.0.0")
+        # kill_process_on_port does not self-terminate current process
+        kill_process_on_port(59998)
+    finally:
+        s.close()
+
+
+def test_run_server_port_occupied_healthy_exit(monkeypatch, tmp_path):
+    from llmhub.server.server import run_server
+    from llmhub.config import LLMHubConfig
+
+    cfg = LLMHubConfig(base_dir=tmp_path)
+    monkeypatch.setattr("llmhub.server.server.is_port_in_use", lambda port, host: True)
+
+    requested_urls = []
+    class MockHttpxResponse:
+        status_code = 200
+        def json(self):
+            return {"status": "healthy"}
+
+    class MockHttpxClient:
+        def __init__(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def get(self, url):
+            requested_urls.append(url)
+            return MockHttpxResponse()
+
+    monkeypatch.setattr("httpx.Client", MockHttpxClient)
+
+    # Calling run_server with 0.0.0.0 should probe 127.0.0.1 and cleanly exit 0
+    with pytest.raises(SystemExit) as exc:
+        run_server(host="0.0.0.0", port=11434, config=cfg, force=False)
+    assert exc.value.code == 0
+    assert any("127.0.0.1:11434/healthz" in u for u in requested_urls)
+
+
+def test_run_server_force_reclaims_port(monkeypatch, tmp_path):
+    from llmhub.server.server import run_server
+    from llmhub.config import LLMHubConfig
+    from llmhub.core.lifecycle import PIDManager
+
+    cfg = LLMHubConfig(base_dir=tmp_path)
+    pid_mgr = PIDManager(cfg.run_dir)
+    pid_mgr.run_dir.mkdir(parents=True, exist_ok=True)
+    import json
+    pid_data = {
+        "pid": 999999,
+        "host": "127.0.0.1",
+        "port": 11434,
+        "version": "1.0.0",
+        "started_at": "2026-10-20T00:00:00Z"
+    }
+    pid_mgr.pid_file.write_text(json.dumps(pid_data))
+
+    calls = {"killed_port": None, "uvicorn_ran": False}
+    # Initially occupied, but freed after kill
+    port_state = [True, False]
+    def mock_is_port(port, host):
+        return port_state.pop(0) if port_state else False
+
+    monkeypatch.setattr("llmhub.server.server.is_port_in_use", mock_is_port)
+    monkeypatch.setattr("llmhub.server.server.kill_process_on_port", lambda p: calls.update({"killed_port": p}))
+    monkeypatch.setattr("uvicorn.run", lambda *a, **kw: calls.update({"uvicorn_ran": True}))
+
+    run_server(port=11434, config=cfg, force=True)
+    assert calls["uvicorn_ran"] is True
+
+
+
+
 
