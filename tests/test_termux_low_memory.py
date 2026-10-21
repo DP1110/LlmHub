@@ -971,8 +971,8 @@ def test_llamacpp_backend_cli_prompt_leader_and_stop_isolation(tmp_path: Path, m
             backend.unload()
 
 
-def test_candidate_selection_prioritizes_llama_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure llama-completion is prioritized over llama-cli when present."""
+def test_candidate_selection_prioritizes_llama_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure standard llama-cli is prioritized over llama-completion when present."""
     from llmhub.core.runner import ModelRunner
     import llmhub.core.runner as runner_mod
     import shutil
@@ -995,7 +995,7 @@ def test_candidate_selection_prioritizes_llama_completion(tmp_path: Path, monkey
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             runner = ModelRunner(model_path=dummy)
-            assert runner._cli_binary == "/usr/bin/llama-completion"
+            assert runner._cli_binary == "/usr/bin/llama-cli"
 
 
 def test_runner_cli_model_repeats_prompt_substring_in_response(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1128,14 +1128,15 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
             chunks = list(runner.stream_completion(prompt="Hello"))
             called_cmd = mock_popen.call_args[0][0]
 
-            assert "--no-conversation" not in called_cmd
-            assert "-no-cnv" not in called_cmd
-            assert "-st" not in called_cmd
-            assert "--single-turn" not in called_cmd
+            # Exactly one non-interactive flag should be passed, never both conflicting flags
+            has_st = ("-st" in called_cmd) or ("--single-turn" in called_cmd)
+            has_no_cnv = ("-no-cnv" in called_cmd) or ("--no-conversation" in called_cmd)
+            assert (has_st or has_no_cnv)
+            assert not (has_st and has_no_cnv)
             assert "/usr/bin/llama-completion" == called_cmd[0]
             assert "This is a response." in "".join(c["token"] for c in chunks)
 
-        # Also test LlamaCppBackend does not pass conversation flags to llama-completion
+        # Also test LlamaCppBackend passes exactly one non-interactive flag
         import llmhub.server.llamacpp as llamacpp_mod
         from llmhub.server.llamacpp import LlamaCppBackend
         monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
@@ -1156,10 +1157,10 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
             gen, p = backend._create_cli_generator(prompt="Hello", max_tokens=10, temperature=0.7, top_p=0.9, stop=None)
             res = list(gen)
             called_cmd2 = mock_popen2.call_args[0][0]
-            assert "--no-conversation" not in called_cmd2
-            assert "-no-cnv" not in called_cmd2
-            assert "-st" not in called_cmd2
-            assert "--single-turn" not in called_cmd2
+            has_st2 = ("-st" in called_cmd2) or ("--single-turn" in called_cmd2)
+            has_no_cnv2 = ("-no-cnv" in called_cmd2) or ("--no-conversation" in called_cmd2)
+            assert (has_st2 or has_no_cnv2)
+            assert not (has_st2 and has_no_cnv2)
             assert "/usr/bin/llama-completion" == called_cmd2[0]
 
 

@@ -73,7 +73,7 @@ class LlamaCppBackend(Backend):
             import subprocess
 
             candidates = []
-            for name in ["llama-completion", "llama-cli", "llama", "llama-run"]:
+            for name in ["llama-cli", "llama-completion", "llama", "llama-run"]:
                 w = shutil.which(name)
                 if w and w not in candidates:
                     candidates.append(w)
@@ -86,19 +86,19 @@ class LlamaCppBackend(Backend):
             comp_name = "llama-completion.exe" if sys.platform == "win32" else "llama-completion"
             main_name = "main.exe" if sys.platform == "win32" else "main"
             for p in [
-                Path.home() / "llama.cpp" / "build" / "bin" / comp_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / bin_name,
-                Path.home() / "llama.cpp" / "build" / "bin" / "Release" / comp_name,
+                Path.home() / "llama.cpp" / "build" / "bin" / comp_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / "Release" / bin_name,
+                Path.home() / "llama.cpp" / "build" / "bin" / "Release" / comp_name,
                 Path.home() / "llama.cpp" / "build" / "bin" / main_name,
-                Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-completion"),
                 Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-cli"),
-                Path("/data/data/com.termux/files/usr/bin/llama-completion"),
+                Path("/data/data/com.termux/files/home/llama.cpp/build/bin/llama-completion"),
                 Path("/data/data/com.termux/files/usr/bin/llama-cli"),
-                Path("/opt/homebrew/bin/llama-completion"),
+                Path("/data/data/com.termux/files/usr/bin/llama-completion"),
                 Path("/opt/homebrew/bin/llama-cli"),
-                Path("/usr/local/bin/llama-completion"),
+                Path("/opt/homebrew/bin/llama-completion"),
                 Path("/usr/local/bin/llama-cli"),
+                Path("/usr/local/bin/llama-completion"),
             ]:
                 if p.is_file() and (sys.platform == "win32" or os.access(p, os.X_OK)):
                     sp = str(p)
@@ -192,18 +192,18 @@ class LlamaCppBackend(Backend):
             "-t", str(self.n_threads),
             "-c", str(self.n_ctx),
         ]
-        is_completion_bin = "llama-completion" in self._cli_binary.lower()
-
-        if not is_completion_bin:
-            if "-no-cnv" in flags:
-                cmd.append("-no-cnv")
-            elif "--no-conversation" in flags:
-                cmd.append("--no-conversation")
-
-            if "-st" in flags:
-                cmd.append("-st")
-            elif "--single-turn" in flags:
-                cmd.append("--single-turn")
+        # Mutually-exclusive non-interactive execution flag:
+        # -st is the standard llama-cli single-turn flag.
+        # -no-cnv disables conversation mode for pure completion binaries.
+        # NEVER pass both -st and -no-cnv as they conflict in llama.cpp argument parsing!
+        if "-st" in flags:
+            cmd.append("-st")
+        elif "--single-turn" in flags:
+            cmd.append("--single-turn")
+        elif "-no-cnv" in flags:
+            cmd.append("-no-cnv")
+        elif "--no-conversation" in flags:
+            cmd.append("--no-conversation")
 
         no_display_prompt_active = False
         if "--no-display-prompt" in flags:
@@ -212,11 +212,6 @@ class LlamaCppBackend(Backend):
         elif "-no-display-prompt" in flags:
             cmd.append("-no-display-prompt")
             no_display_prompt_active = True
-
-        if "--log-disable" in flags:
-            cmd.append("--log-disable")
-        elif "-ld" in flags:
-            cmd.append("-ld")
 
         if "--special" in flags:
             cmd.append("--special")

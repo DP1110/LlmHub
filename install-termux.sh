@@ -140,7 +140,7 @@ is_binary_runnable() {
 }
 
 LLAMA_BIN=""
-for cand in "llama-completion" "llama-cli" "llama" "llama-run"; do
+for cand in "llama-cli" "llama-completion" "llama" "llama-run"; do
     if command -v "$cand" >/dev/null 2>&1; then
         cand_path="$(command -v "$cand")"
         if is_binary_runnable "$cand_path"; then
@@ -165,7 +165,7 @@ done
 
 # If binary is present in PREFIX/bin but failed execution due to dynamic linking (ABI symbol mismatch)
 if [ -z "$LLAMA_BIN" ]; then
-    for probe_bin in llama-completion llama-cli; do
+    for probe_bin in llama-cli llama-completion; do
         probe_path="${PREFIX:-/data/data/com.termux/files/usr}/bin/$probe_bin"
         if [ -x "$probe_path" ]; then
             echo -e "${YELLOW}[!] Package binary at $probe_path failed link verification.${NC}"
