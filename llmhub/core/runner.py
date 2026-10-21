@@ -711,6 +711,7 @@ class ModelRunner:
             sys.stdout.write("\n")
             assistant_response = ""
             last_stats = {}
+            first_token = True
             is_tty = sys.stdout.isatty()
             if is_tty:
                 sys.stderr.write("[LLMHub] Thinking...")
