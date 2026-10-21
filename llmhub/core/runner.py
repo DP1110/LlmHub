@@ -21,7 +21,7 @@ except ImportError:
     llama_cpp = None
     HAS_LLAMA_CPP = False
 
-from llmhub.config import LLMHubConfig
+from llmhub.config import LLMHubConfig, is_termux
 from llmhub.core.gguf_parser import GGUFParser, GGUFMetadata
 from llmhub.core.registry import ModelRegistry, ModelRecord
 from llmhub.core.template import ChatTemplateEngine
@@ -30,6 +30,16 @@ from llmhub.utils.platform import get_hardware_profile
 
 _CLI_FLAGS_CACHE: Dict[str, Any] = {}
 _CLI_FLAGS_LOCK = threading.Lock()
+
+def get_subprocess_env() -> Dict[str, str]:
+    """Provide a sanitized execution environment with Termux dynamic library paths if applicable."""
+    env = dict(os.environ)
+    if is_termux():
+        termux_lib = "/data/data/com.termux/files/usr/lib"
+        curr_ld = env.get("LD_LIBRARY_PATH", "")
+        if termux_lib not in curr_ld:
+            env["LD_LIBRARY_PATH"] = f"{termux_lib}:{curr_ld}" if curr_ld else termux_lib
+    return env
 
 def get_cli_supported_flags(cli_binary: str) -> Any:
     """Inspect and cache supported command-line flags for the llama-cli executable."""
@@ -42,6 +52,7 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
         try:
             import subprocess
             import re
+            run_env = get_subprocess_env()
             res = subprocess.run(
                 [cli_binary, "-h"],
                 stdin=subprocess.DEVNULL,
@@ -51,7 +62,8 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
                 encoding="utf-8",
                 errors="replace",
                 timeout=15.0,
-                check=False
+                check=False,
+                env=run_env
             )
             help_text = (res.stdout or "") + "\n" + (res.stderr or "")
             if len(help_text.strip()) < 100:
@@ -64,7 +76,8 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
                     encoding="utf-8",
                     errors="replace",
                     timeout=15.0,
-                    check=False
+                    check=False,
+                    env=run_env
                 )
                 help_text += "\n" + (res.stdout or "") + "\n" + (res.stderr or "")
 
@@ -94,8 +107,12 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
 ASSISTANT_HEADERS = (
     "<|im_start|>assistant\n",
     "<|im_start|>assistant",
+    "<start_of_turn>model\n",
+    "<start_of_turn>model",
     "<|start_header_id|>assistant<|end_header_id|>\n\n",
     "<|start_header_id|>assistant<|end_header_id|>",
+    "<|assistant|>\n",
+    "<|assistant|>",
     "### Response:\n",
     "### Response:",
     "[/INST] ",
@@ -228,7 +245,8 @@ class ModelRunner:
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        timeout=3.0
+                        timeout=3.0,
+                        env=get_subprocess_env()
                     )
                     out = (res.stdout or b"") + (res.stderr or b"")
                     err = out.decode("utf-8", errors="replace")
@@ -404,7 +422,7 @@ class ModelRunner:
                 # Fluid token/character-based chunk streaming with prompt echo filtering
                 buffer = ""
                 initial_buffer = ""
-                clean_prompt_norm = prompt.strip().replace("\r\n", "\n") if prompt else ""
+                clean_prompt_norm = prompt.strip().replace("\r\n", "\n").replace("\r", "\n") if prompt else ""
                 prompt_stripped = not bool(clean_prompt_norm)
                 while not hit_stop:
                     char = proc.stdout.read(1)
@@ -414,7 +432,7 @@ class ModelRunner:
                     # Detect and strip prompt if llama-cli echoed it
                     if not prompt_stripped:
                         initial_buffer += char
-                        norm_buf = initial_buffer.replace("\r\n", "\n")
+                        norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
 
                         # 1. Clean match: clean_prompt appeared in initial_buffer (normalized)
                         if clean_prompt_norm and clean_prompt_norm in norm_buf:
@@ -427,7 +445,7 @@ class ModelRunner:
                             continue
 
                         # 2. In-progress prefix match (strip prompt leaders like "> " and solitary \r mid-CRLF)
-                        cand = norm_buf.rstrip("\r").lstrip("\r\n >\t")
+                        cand = norm_buf.rstrip("\r\n").lstrip("\r\n >\t")
                         if not cand or (clean_prompt_norm and clean_prompt_norm.startswith(cand)):
                             continue
 
@@ -456,6 +474,11 @@ class ModelRunner:
                             accumulated_output = buffer
                         initial_buffer = ""
                     else:
+                        # Guard against prompt-trailing newline/leader leakage (Critical 1)
+                        if not accumulated_output:
+                            if char in ("\r", "\n", " ", "\t", ">"):
+                                buffer = ""
+                                continue
                         buffer += char
                         accumulated_output += char
 
@@ -496,7 +519,7 @@ class ModelRunner:
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
-                    norm_buf = initial_buffer.replace("\r\n", "\n")
+                    norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
                     if clean_prompt_norm and clean_prompt_norm in norm_buf:
                         buffer = norm_buf.split(clean_prompt_norm, 1)[1].lstrip("\r\n >\t") + buffer
                     else:
@@ -508,11 +531,15 @@ class ModelRunner:
                     initial_buffer = ""
                     prompt_stripped = True
 
-                # Strip any stop sequences present at premature EOF flush (CRIT-4)
+                # Strip full or partial stop sequences present at premature EOF flush (CRIT-4 / Warning 6)
                 if buffer and stop:
                     for s in stop:
                         if s in buffer:
                             buffer = buffer[:buffer.rfind(s)]
+                        for i in range(len(s), 0, -1):
+                            if buffer.endswith(s[:i]) and s[:i] not in ("\n", " ", "\t"):
+                                buffer = buffer[:-i]
+                                break
 
                 # Yield remaining buffer if any
                 if buffer:

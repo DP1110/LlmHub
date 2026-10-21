@@ -16,7 +16,9 @@ except ImportError:
     llama_cpp = None
     HAS_LLAMA_CPP = False
 
+from llmhub.config import is_termux
 from llmhub.core.gguf_parser import GGUFParser, GGUFMetadata
+from llmhub.core.runner import get_subprocess_env
 from llmhub.hardware.tuner import AutoTuner
 from llmhub.server.backend import Backend, DecodeResult, SessionState
 from llmhub.utils.math_calc import compute_memory_breakdown, estimate_decode_throughput
@@ -112,7 +114,8 @@ class LlamaCppBackend(Backend):
                         stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
-                        timeout=3.0
+                        timeout=3.0,
+                        env=get_subprocess_env()
                     )
                     out = (res.stdout or b"") + (res.stderr or b"")
                     err = out.decode("utf-8", errors="replace")
@@ -256,7 +259,7 @@ class LlamaCppBackend(Backend):
         def _gen():
             buffer = ""
             initial_buffer = ""
-            clean_prompt_norm = prompt.strip().replace("\r\n", "\n") if prompt else ""
+            clean_prompt_norm = prompt.strip().replace("\r\n", "\n").replace("\r", "\n") if prompt else ""
             prompt_stripped = not bool(clean_prompt_norm)
             tokens_yielded = 0
             accumulated_output = ""
@@ -270,7 +273,7 @@ class LlamaCppBackend(Backend):
                     # Detect and strip echoed prompt
                     if not prompt_stripped:
                         initial_buffer += char
-                        norm_buf = initial_buffer.replace("\r\n", "\n")
+                        norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
 
                         # 1. Clean match: clean_prompt appeared in initial_buffer (normalized)
                         if clean_prompt_norm and clean_prompt_norm in norm_buf:
@@ -283,7 +286,7 @@ class LlamaCppBackend(Backend):
                             continue
 
                         # 2. In-progress prefix match (strip prompt leaders like "> " and solitary \r mid-CRLF)
-                        cand = norm_buf.rstrip("\r").lstrip("\r\n >\t")
+                        cand = norm_buf.rstrip("\r\n").lstrip("\r\n >\t")
                         if not cand or (clean_prompt_norm and clean_prompt_norm.startswith(cand)):
                             continue
 
@@ -312,6 +315,11 @@ class LlamaCppBackend(Backend):
                             accumulated_output = buffer
                         initial_buffer = ""
                     else:
+                        # Guard against prompt-trailing newline/leader leakage (Critical 1)
+                        if not accumulated_output:
+                            if char in ("\r", "\n", " ", "\t", ">"):
+                                buffer = ""
+                                continue
                         buffer += char
                         accumulated_output += char
 
@@ -339,7 +347,7 @@ class LlamaCppBackend(Backend):
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
-                    norm_buf = initial_buffer.replace("\r\n", "\n")
+                    norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
                     if clean_prompt_norm and clean_prompt_norm in norm_buf:
                         buffer = norm_buf.split(clean_prompt_norm, 1)[1].lstrip("\r\n >\t") + buffer
                     else:
@@ -351,11 +359,15 @@ class LlamaCppBackend(Backend):
                     initial_buffer = ""
                     prompt_stripped = True
 
-                # Strip any stop sequences present at premature EOF flush (CRIT-4)
+                # Strip full or partial stop sequences present at premature EOF flush (CRIT-4 / Warning 6)
                 if buffer and stop:
                     for s in stop:
                         if s in buffer:
                             buffer = buffer[:buffer.rfind(s)]
+                        for i in range(len(s), 0, -1):
+                            if buffer.endswith(s[:i]) and s[:i] not in ("\n", " ", "\t"):
+                                buffer = buffer[:-i]
+                                break
 
                 if buffer:
                     tokens_yielded += 1

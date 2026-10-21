@@ -1141,7 +1141,9 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
         from llmhub.server.llamacpp import LlamaCppBackend
         monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
         monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
-        llamacpp_mod._CLI_FLAGS_CACHE = {}
+        runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-completion"] = {
+            "-m", "-p", "-c", "-t", "-n", "--temp", "-st"
+        }
 
         backend = LlamaCppBackend()
         backend.load(model_path=dummy)
@@ -1427,7 +1429,7 @@ def test_runner_cli_crlf_prompt_echo_stripping(tmp_path: Path, monkeypatch: pyte
 
             assert "You are a helpful assistant" not in full_text
             assert "What is 2+2?" not in full_text
-            assert "2+2 is 4." in full_text
+            assert full_text.startswith("2+2 is 4.")
             assert "<|im_end|>" not in full_text
             assert chunks[-1]["done"] is True
             assert chunks[-1]["token_count"] > 0
@@ -1446,7 +1448,8 @@ def test_llamacpp_backend_crlf_prompt_echo_stripping(tmp_path: Path, monkeypatch
     monkeypatch.setattr(backend_mod, "llama_cpp", None)
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
 
-    backend_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+    import llmhub.core.runner as runner_mod
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
 
     prompt = (
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -1485,8 +1488,84 @@ def test_llamacpp_backend_crlf_prompt_echo_stripping(tmp_path: Path, monkeypatch
             full_text = "".join(tokens)
             assert "You are a helpful assistant" not in full_text
             assert "Say hello!" not in full_text
-            assert "Hello there! How can I help?" in full_text
+            assert full_text.startswith("Hello there! How can I help?")
             assert "<|im_end|>" not in full_text
+
+            backend.close_session("sess-crlf")
+            backend.unload()
+
+
+def test_runner_cli_gemma_chat_template_prompt_echo_stripping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure Gemma <start_of_turn>model headers strip cleanly without early abortion."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_gemma.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    gemma_prompt = "<start_of_turn>user\nWhat is Python?<end_of_turn>\n<start_of_turn>model\n"
+    stream_output = gemma_prompt.replace("\n", "\r\n") + "Python is a versatile programming language.<end_of_turn>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=gemma_prompt, stop=["<end_of_turn>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "<start_of_turn>" not in full_text
+            assert "<end_of_turn>" not in full_text
+            assert "What is Python?" not in full_text
+            assert full_text.startswith("Python is a versatile programming language.")
+            assert chunks[-1]["done"] is True
+
+
+def test_runner_cli_eof_partial_stop_sequence_stripped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure partial trailing stop tokens at premature subprocess EOF are stripped cleanly."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_partial_stop.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = "Hi"
+    # Stream prematurely terminates while outputting <|im_
+    stream_output = "Hi\nHello there world!<|im_"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "<|im_" not in full_text
+            assert full_text.startswith("Hello there world!")
+
 
 
 
