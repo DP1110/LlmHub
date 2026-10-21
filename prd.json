@@ -4,7 +4,12 @@
   "description": "Offline-first, Ollama-like LLM runtime platform running GGUF models on CPU with token-level round-robin scheduler across PC and Android Termux",
   "branchName": "main",
   "overview": {
-    "target_platforms": ["Linux", "Windows", "macOS", "Android via Termux (ARM64)"],
+    "target_platforms": [
+      "Linux",
+      "Windows",
+      "macOS",
+      "Android via Termux (ARM64)"
+    ],
     "runtime": "Python 3.11 + asyncio prototype backed by llama-cpp-python C bindings",
     "storage_root": "~/.llmhub",
     "architecture_target": "Zero-cloud, memory-bandwidth bounded CPU inference with token-level multi-model multi-session concurrency"
@@ -991,7 +996,19 @@
         "Ensure pip install -e . succeeds cleanly on Termux without compiling numpy from source",
         "100% test pass rate across all 220 tests in test suite"
       ]
+    },
+    {
+      "id": "US-076",
+      "title": "Termux TTY CRLF Normalization and Premature Stop-Token Echo Hardening",
+      "phase": 11,
+      "description": "Normalize CRLF (\\r\\n) and mid-transmission solitary \\r line endings produced by Android Termux pseudo-terminal ONLCR output discipline during prompt echo filtering in ModelRunner and LlamaCppBackend. Prevent premature divergence from clean_prompt_norm and guard stop sequences (<|im_end|>, etc.) so that multi-turn or system prompts echoed by llama-cli do not prematurely kill inference, ensuring terminal LLM run cleanly streams generated text before token metrics.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Strip echoed prompts with CRLF (\\r\\n) without falsely diverging at system prompt line endings",
+        "Handle mid-transmission solitary \\r so prefix matching does not break before \\n arrives",
+        "Ensure stop tokens are never matched against echoed prompt slices",
+        "100% test pass rate across all 222 tests in test suite"
+      ]
     }
   ]
 }
-

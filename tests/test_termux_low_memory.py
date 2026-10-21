@@ -1390,3 +1390,104 @@ def test_runner_cli_mistral_llama2_inst_tags_stripping(tmp_path: Path, monkeypat
             assert chunks[-1]["done"] is True
 
 
+def test_runner_cli_crlf_prompt_echo_stripping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure CRLF (\r\n) line endings from TTY ONLCR discipline do not prematurely trigger stop tokens or false divergence."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_crlf.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\nWhat is 2+2?<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    # TTY echo with CRLF line endings
+    stream_output = prompt.replace("\n", "\r\n") + "2+2 is 4.<|im_end|>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "You are a helpful assistant" not in full_text
+            assert "What is 2+2?" not in full_text
+            assert "2+2 is 4." in full_text
+            assert "<|im_end|>" not in full_text
+            assert chunks[-1]["done"] is True
+            assert chunks[-1]["token_count"] > 0
+
+
+def test_llamacpp_backend_crlf_prompt_echo_stripping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend correctly strips CRLF echoed prompts without losing generated answer."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as backend_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_backend_crlf.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(backend_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(backend_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    backend_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+        "<|im_start|>user\nSay hello!<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    stream_output = prompt.replace("\n", "\r\n") + "Hello there! How can I help?<|im_end|>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file") as mock_parse:
+        mock_meta = MagicMock()
+        mock_meta.architecture = "llama"
+        mock_meta.block_count = 12
+        mock_meta.head_count = 8
+        mock_meta.head_count_kv = 4
+        mock_meta.head_dim = 64
+        mock_parse.return_value = mock_meta
+
+        backend = LlamaCppBackend()
+        backend.load(dummy, n_ctx=1024, n_threads=4)
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            backend.new_session("sess-crlf", prompt=prompt, stop=["<|im_end|>"])
+            tokens = []
+            while True:
+                res = backend.decode_step("sess-crlf", n_tokens=4)
+                tokens.extend(res.text_deltas)
+                if res.done:
+                    break
+
+            full_text = "".join(tokens)
+            assert "You are a helpful assistant" not in full_text
+            assert "Say hello!" not in full_text
+            assert "Hello there! How can I help?" in full_text
+            assert "<|im_end|>" not in full_text
+
+
+
+

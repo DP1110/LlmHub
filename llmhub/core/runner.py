@@ -404,8 +404,8 @@ class ModelRunner:
                 # Fluid token/character-based chunk streaming with prompt echo filtering
                 buffer = ""
                 initial_buffer = ""
-                prompt_stripped = not bool(prompt)
-                clean_prompt = prompt.strip() if prompt else ""
+                clean_prompt_norm = prompt.strip().replace("\r\n", "\n") if prompt else ""
+                prompt_stripped = not bool(clean_prompt_norm)
                 while not hit_stop:
                     char = proc.stdout.read(1)
                     if not char:
@@ -414,49 +414,45 @@ class ModelRunner:
                     # Detect and strip prompt if llama-cli echoed it
                     if not prompt_stripped:
                         initial_buffer += char
+                        norm_buf = initial_buffer.replace("\r\n", "\n")
 
-                        # 1. Clean match: clean_prompt appeared in initial_buffer
-                        if clean_prompt and clean_prompt in initial_buffer:
+                        # 1. Clean match: clean_prompt appeared in initial_buffer (normalized)
+                        if clean_prompt_norm and clean_prompt_norm in norm_buf:
                             prompt_stripped = True
-                            remainder = initial_buffer.split(clean_prompt, 1)[1]
+                            remainder = norm_buf.split(clean_prompt_norm, 1)[1]
                             hdr_rem = strip_assistant_header(remainder)
-                            if hdr_rem is not None:
-                                buffer = hdr_rem
-                            else:
-                                buffer = remainder.lstrip("\r\n >\t")
+                            buffer = hdr_rem if hdr_rem is not None else remainder.lstrip("\r\n >\t")
                             accumulated_output = buffer
                             initial_buffer = ""
                             continue
 
-                        # 2. In-progress prefix match (strip prompt leaders like "> ")
-                        cand = initial_buffer.lstrip("\r\n >\t")
-                        if not cand:
+                        # 2. In-progress prefix match (strip prompt leaders like "> " and solitary \r mid-CRLF)
+                        cand = norm_buf.rstrip("\r").lstrip("\r\n >\t")
+                        if not cand or (clean_prompt_norm and clean_prompt_norm.startswith(cand)):
                             continue
 
-                        # Prioritize in-progress prefix match while binary is still echoing prompt
-                        if clean_prompt and clean_prompt.startswith(cand):
+                        # 3. Check if clean_prompt start appears after some banner or menu
+                        prompt_head = clean_prompt_norm[:min(30, len(clean_prompt_norm))] if clean_prompt_norm else ""
+                        if prompt_head and prompt_head in norm_buf:
+                            idx = norm_buf.find(prompt_head)
+                            norm_buf = norm_buf[idx:]
+                            initial_buffer = norm_buf
                             continue
 
-                        # 4. Check if clean_prompt start appears after some banner or menu
-                        prompt_head = clean_prompt[:min(30, len(clean_prompt))] if clean_prompt else ""
-                        if prompt_head and prompt_head in initial_buffer:
-                            initial_buffer = initial_buffer[initial_buffer.find(prompt_head):]
-                            continue
-
-                        # 5. If candidate matches a known banner, continue buffering up to 256 bytes
-                        known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob")
+                        # 4. Known banners buffering
+                        known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob", "main:", "llama_")
                         is_banner = any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
-                        if is_banner and len(initial_buffer) < 256:
+                        if is_banner and len(norm_buf) < 512:
                             continue
 
-                        # 6. Diverged from prompt prefix and not a banner: output is genuine generated text
+                        # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
                         prompt_stripped = True
-                        hdr_div = strip_assistant_header(initial_buffer)
+                        hdr_div = strip_assistant_header(norm_buf)
                         if hdr_div is not None:
                             buffer = hdr_div
                             accumulated_output = hdr_div
                         else:
-                            buffer = initial_buffer.lstrip("\r\n >\t")
+                            buffer = norm_buf.lstrip("\r\n >\t")
                             accumulated_output = buffer
                         initial_buffer = ""
                     else:
@@ -500,14 +496,15 @@ class ModelRunner:
 
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
-                    if clean_prompt and clean_prompt in initial_buffer:
-                        buffer = initial_buffer.split(clean_prompt, 1)[1].lstrip("\r\n >\t") + buffer
+                    norm_buf = initial_buffer.replace("\r\n", "\n")
+                    if clean_prompt_norm and clean_prompt_norm in norm_buf:
+                        buffer = norm_buf.split(clean_prompt_norm, 1)[1].lstrip("\r\n >\t") + buffer
                     else:
-                        hdr = strip_assistant_header(initial_buffer)
+                        hdr = strip_assistant_header(norm_buf)
                         if hdr is not None:
                             buffer = hdr + buffer
                         else:
-                            buffer = initial_buffer + buffer
+                            buffer = norm_buf + buffer
                     initial_buffer = ""
                     prompt_stripped = True
 
