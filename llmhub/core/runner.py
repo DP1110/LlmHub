@@ -335,16 +335,21 @@ class ModelRunner:
                 "-t", str(self.n_threads),
                 "-c", str(self.n_ctx),
             ]
-            # Force non-interactive single-turn completion mode if supported by binary
-            if "-no-cnv" in flags:
-                cmd.append("-no-cnv")
-            elif "--no-conversation" in flags:
-                cmd.append("--no-conversation")
+            # Conversation-mode flags are ONLY for llama-cli / llama-run.
+            # llama-completion is already a pure completion binary and these flags
+            # cause it to silently produce 0 tokens on Termux ARM64.
+            is_completion_bin = "llama-completion" in self._cli_binary.lower()
 
-            if "-st" in flags:
-                cmd.append("-st")
-            elif "--single-turn" in flags:
-                cmd.append("--single-turn")
+            if not is_completion_bin:
+                if "-no-cnv" in flags:
+                    cmd.append("-no-cnv")
+                elif "--no-conversation" in flags:
+                    cmd.append("--no-conversation")
+
+                if "-st" in flags:
+                    cmd.append("-st")
+                elif "--single-turn" in flags:
+                    cmd.append("--single-turn")
 
             no_display_prompt_active = False
             if "--no-display-prompt" in flags:

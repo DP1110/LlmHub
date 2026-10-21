@@ -978,6 +978,19 @@
         "Implement automatic seamless fallback from HTTP daemon to direct standalone execution in cmd_run if server returns 0 tokens or fails",
         "100% test pass rate across all 217 tests in test suite"
       ]
+    },
+    {
+      "id": "US-075",
+      "title": "Termux Pure-Python pyproject.toml Decoupling and llama-completion Flag Isolation",
+      "phase": 11,
+      "description": "Make llama-cpp-python an optional dependency in pyproject.toml to eliminate numpy compilation failures on ARM64 Android Termux during 'pip install -e .'; strictly isolate conversation flags (-no-cnv, -st, --single-turn, --no-conversation) to llama-cli only so that llama-completion does not fail with 0 tokens.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Remove llama-cpp-python from mandatory dependencies in pyproject.toml, making it optional [gpu]",
+        "Prevent passing -no-cnv, -st, --single-turn, and --no-conversation to llama-completion binary in ModelRunner and LlamaCppBackend",
+        "Ensure pip install -e . succeeds cleanly on Termux without compiling numpy from source",
+        "100% test pass rate across all 220 tests in test suite"
+      ]
     }
   ]
 }

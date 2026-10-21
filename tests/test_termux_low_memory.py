@@ -1108,8 +1108,11 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
     monkeypatch.setattr(runner_mod, "llama_cpp", None)
     monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-completion" if cmd == "llama-completion" else None)
 
-    # llama-completion --help outputs only completion options, no conversation flags
-    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-completion"] = {"-m", "-p", "-c", "-t", "-n", "--temp"}
+    # Even if llama-completion help output contains common arg flags like -no-cnv or -st,
+    # the runner must strictly skip them for llama-completion.
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-completion"] = {
+        "-m", "-p", "-c", "-t", "-n", "--temp", "-no-cnv", "--no-conversation", "-st", "--single-turn", "--no-display-prompt"
+    }
 
     with patch("llmhub.core.runner.GGUFParser.parse_file"):
         runner = ModelRunner(model_path=dummy)
@@ -1131,6 +1134,33 @@ def test_llama_completion_does_not_pass_unsupported_conversation_flags(tmp_path:
             assert "--single-turn" not in called_cmd
             assert "/usr/bin/llama-completion" == called_cmd[0]
             assert "This is a response." in "".join(c["token"] for c in chunks)
+
+        # Also test LlamaCppBackend does not pass conversation flags to llama-completion
+        import llmhub.server.llamacpp as llamacpp_mod
+        from llmhub.server.llamacpp import LlamaCppBackend
+        monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+        monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+        llamacpp_mod._CLI_FLAGS_CACHE = {}
+
+        backend = LlamaCppBackend()
+        backend.load(model_path=dummy)
+        assert backend._cli_binary == "/usr/bin/llama-completion"
+        with patch("subprocess.Popen") as mock_popen2:
+            mock_proc2 = MagicMock()
+            mock_proc2.stdout = io.StringIO("Backend response.")
+            mock_proc2.stderr = io.StringIO("")
+            mock_proc2.poll.return_value = 0
+            mock_popen2.return_value = mock_proc2
+
+            sess = backend.new_session("s_comp", "Hello world")
+            gen, p = backend._create_cli_generator(prompt="Hello", max_tokens=10, temperature=0.7, top_p=0.9, stop=None)
+            res = list(gen)
+            called_cmd2 = mock_popen2.call_args[0][0]
+            assert "--no-conversation" not in called_cmd2
+            assert "-no-cnv" not in called_cmd2
+            assert "-st" not in called_cmd2
+            assert "--single-turn" not in called_cmd2
+            assert "/usr/bin/llama-completion" == called_cmd2[0]
 
 
 def test_is_runnable_accepts_help_output_and_rejects_linker_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
