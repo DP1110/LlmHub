@@ -1009,6 +1009,19 @@
         "Ensure stop tokens are never matched against echoed prompt slices",
         "100% test pass rate across all 222 tests in test suite"
       ]
+    },
+    {
+      "id": "US-077",
+      "title": "llama-cli Interactive Conversation Banner Stripping and Target Header-Aware Output Extraction",
+      "phase": 11,
+      "description": "Prioritize --no-conversation and -no-cnv flags ahead of single-turn interactive flags to suppress llama-cli ASCII banners, command menus, and prompt leaders. For binaries that still run in interactive conversation mode, implement chat prompt header completion tracking (counting target assistant header occurrences like <|im_start|>assistant, <start_of_turn>model) and buffer until the final assistant turn is reached before stripping all preceding banners and prompt leaders, ensuring terminal chat displays clean model answers with non-zero token metrics on Android Termux.",
+      "status": "completed",
+      "acceptanceCriteria": [
+        "Prioritize --no-conversation and -no-cnv over -st and --single-turn in ModelRunner and LlamaCppBackend",
+        "Implement chat prompt header completion to cleanly strip interactive ASCII banners and > prompt leaders",
+        "Expand known_banner_prefixes to buffer startup diagnostic lines (Loading model, available commands, etc.)",
+        "100% test pass rate across all 226 tests in test suite"
+      ]
     }
   ]
 }

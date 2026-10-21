@@ -552,9 +552,9 @@ def test_runner_cli_flags_and_prompt_echo_stripping(tmp_path: Path, monkeypatch:
             assert "AI is artificial intelligence." in full_text
             assert chunks[-1]["done"] is True
 
-            # Verify -st flag was passed in command
+            # Verify non-interactive execution flag was passed in command
             called_cmd = mock_popen.call_args[0][0]
-            assert "-st" in called_cmd or "--single-turn" in called_cmd
+            assert any(f in called_cmd for f in ("--no-conversation", "-no-cnv", "-st", "--single-turn"))
 
 
 def test_runner_cli_error_surfacing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1565,6 +1565,163 @@ def test_runner_cli_eof_partial_stop_sequence_stripped(tmp_path: Path, monkeypat
 
             assert "<|im_" not in full_text
             assert full_text.startswith("Hello there world!")
+
+
+def test_runner_cli_interactive_conversation_banner_and_leaders_stripped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure llama-cli interactive conversation mode ASCII banners, commands menus, and '> ' prompt leaders are stripped cleanly."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_banner.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful and concise offline AI assistant.<|im_end|>\n"
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    # Exact ASCII banner and prompt echo seen in Android Termux single-turn mode
+    stream_output = (
+        "Loading model...\n"
+        "llama.cpp\n"
+        "build: b0-unknown (d9bbde9f)\n"
+        "modalities: text\n"
+        "available commands: /exit, /regen, /clear, /read, /glob\n"
+        "> <|im_start|>system\n"
+        "You are a helpful and concise offline AI assistant.<|im_end|>\n"
+        "> <|im_start|>user\n"
+        "hi<|im_end|>\n"
+        "> <|im_start|>assistant\n"
+        "Hello! How can I help you today?<|im_end|>"
+    )
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            chunks = list(runner.stream_completion(prompt=prompt, stop=["<|im_end|>"]))
+            full_text = "".join(c["token"] for c in chunks)
+
+            assert "available commands" not in full_text
+            assert "Loading model" not in full_text
+            assert "<|im_start|>system" not in full_text
+            assert "<|im_start|>user" not in full_text
+            assert "<|im_end|>" not in full_text
+            assert full_text == "Hello! How can I help you today?"
+            assert chunks[-1]["done"] is True
+            assert chunks[-1]["token_count"] > 0
+
+
+def test_llamacpp_backend_cli_interactive_conversation_banner_stripped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure LlamaCppBackend CLI generator strips interactive conversation banners and prompt leaders cleanly."""
+    from llmhub.server.llamacpp import LlamaCppBackend
+    import llmhub.server.llamacpp as llamacpp_mod
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_banner_backend.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(llamacpp_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(llamacpp_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"-st"}
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful and concise offline AI assistant.<|im_end|>\n"
+        "<|im_start|>user\nhi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    stream_output = (
+        "Loading model...\n"
+        "llama.cpp\n"
+        "build: b0-unknown (d9bbde9f)\n"
+        "modalities: text\n"
+        "available commands: /exit, /regen, /clear, /read, /glob\n"
+        "> <|im_start|>system\n"
+        "You are a helpful and concise offline AI assistant.<|im_end|>\n"
+        "> <|im_start|>user\n"
+        "hi<|im_end|>\n"
+        "> <|im_start|>assistant\n"
+        "Hello! How can I help you today?<|im_end|>"
+    )
+
+    with patch("llmhub.server.llamacpp.GGUFParser.parse_file"):
+        backend = LlamaCppBackend()
+        backend.load(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            gen, proc = backend._create_cli_generator(prompt=prompt, max_tokens=128, temperature=0.7, top_p=0.9, stop=["<|im_end|>"])
+            chunks = list(gen)
+            full_text = "".join(c["choices"][0]["text"] for c in chunks)
+
+            assert "available commands" not in full_text
+            assert "Loading model" not in full_text
+            assert "<|im_start|>system" not in full_text
+            assert "<|im_start|>user" not in full_text
+            assert "<|im_end|>" not in full_text
+            assert full_text == "Hello! How can I help you today?"
+
+
+def test_runner_cli_streaming_incremental_yield_when_prompt_not_echoed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure tokens are yielded incrementally without buffering the entire output until EOF when prompt is not echoed."""
+    from llmhub.core.runner import ModelRunner
+    import llmhub.core.runner as runner_mod
+    import shutil
+    import io
+
+    dummy = tmp_path / "test_incremental.gguf"
+    dummy.write_bytes(b"GGUF\x03\x00\x00\x00" + b"\x00" * 64)
+    monkeypatch.setattr(runner_mod, "HAS_LLAMA_CPP", False)
+    monkeypatch.setattr(runner_mod, "llama_cpp", None)
+    monkeypatch.setattr(shutil, "which", lambda cmd: "/usr/bin/llama-cli")
+
+    runner_mod._CLI_FLAGS_CACHE["/usr/bin/llama-cli"] = {"--no-conversation"}
+
+    prompt = (
+        "<|im_start|>system\nYou are a helpful AI.<|im_end|>\n"
+        "<|im_start|>user\nSay hi<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    # Binary runs with clean non-interactive mode: prompt is NOT echoed
+    stream_output = "The quick brown fox jumps over the lazy dog.<|im_end|>"
+
+    with patch("llmhub.core.runner.GGUFParser.parse_file"):
+        runner = ModelRunner(model_path=dummy)
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.stdout = io.StringIO(stream_output)
+            mock_proc.stderr = io.StringIO("")
+            mock_proc.poll.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            gen = runner.stream_completion(prompt=prompt, stop=["<|im_end|>"])
+            chunks = list(gen)
+            # Verify incremental streaming: multiple chunks were emitted rather than 1 monolithic chunk at EOF
+            assert len(chunks) > 3
+            full_text = "".join(c["token"] for c in chunks)
+            assert full_text == "The quick brown fox jumps over the lazy dog."
+            assert chunks[-1]["done"] is True
+
+
 
 
 

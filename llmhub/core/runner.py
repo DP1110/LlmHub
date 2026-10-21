@@ -8,6 +8,7 @@ Features:
 """
 
 import os
+import re
 import sys
 import threading
 import time
@@ -103,6 +104,16 @@ def get_cli_supported_flags(cli_binary: str) -> Any:
         # Always cache result to prevent repeated 15s probe timeouts on slow mobile devices
         _CLI_FLAGS_CACHE[cli_binary] = supported
         return supported
+
+BASE_ASSISTANT_HEADERS = (
+    "<|im_start|>assistant",
+    "<start_of_turn>model",
+    "<|start_header_id|>assistant<|end_header_id|>",
+    "<|assistant|>",
+    "### Response:",
+    "[/INST]",
+    "Assistant:",
+)
 
 ASSISTANT_HEADERS = (
     "<|im_start|>assistant\n",
@@ -354,17 +365,17 @@ class ModelRunner:
                 "-c", str(self.n_ctx),
             ]
             # Mutually-exclusive non-interactive execution flag:
-            # -st is the standard llama-cli single-turn flag.
-            # -no-cnv disables conversation mode for pure completion binaries.
-            # NEVER pass both -st and -no-cnv as they conflict in llama.cpp argument parsing!
-            if "-st" in flags:
-                cmd.append("-st")
-            elif "--single-turn" in flags:
-                cmd.append("--single-turn")
+            # Prefer disabling conversation mode completely (--no-conversation / -no-cnv) so that llama-cli
+            # does not print interactive ASCII logos, commands menus, or prompt leaders (> ).
+            # Fall back to single-turn (--single-turn / -st) if conversation mode cannot be disabled.
+            if "--no-conversation" in flags:
+                cmd.append("--no-conversation")
             elif "-no-cnv" in flags:
                 cmd.append("-no-cnv")
-            elif "--no-conversation" in flags:
-                cmd.append("--no-conversation")
+            elif "--single-turn" in flags:
+                cmd.append("--single-turn")
+            elif "-st" in flags:
+                cmd.append("-st")
 
             no_display_prompt_active = False
             if "--no-display-prompt" in flags:
@@ -401,7 +412,8 @@ class ModelRunner:
                 popen_kwargs["start_new_session"] = True
 
             proc = subprocess.Popen(cmd, **popen_kwargs)
-            stderr_chunks: List[str] = []
+            import collections
+            stderr_chunks: collections.deque[str] = collections.deque(maxlen=200)
             def _drain_stderr() -> None:
                 try:
                     if proc.stderr:
@@ -424,6 +436,25 @@ class ModelRunner:
                 initial_buffer = ""
                 clean_prompt_norm = prompt.strip().replace("\r\n", "\n").replace("\r", "\n") if prompt else ""
                 prompt_stripped = not bool(clean_prompt_norm)
+
+                target_assistant_hdr: Optional[str] = None
+                target_hdr_count: int = 0
+                if clean_prompt_norm:
+                    for h in BASE_ASSISTANT_HEADERS:
+                        cnt = clean_prompt_norm.count(h)
+                        if cnt > 0:
+                            target_assistant_hdr = h
+                            target_hdr_count = cnt
+                            break
+
+                known_banner_prefixes = (
+                    "loading", "llama", "build", "model", "ftype", "modalities",
+                    "available commands", "commands:", "/exit", "/quit", "/regen",
+                    "/clear", "/reset", "/read", "/glob", "main:", "llama_",
+                    "system_info", "sampling", "generate"
+                )
+                max_header_buffer_len = max(4096, len(clean_prompt_norm) + 4096)
+
                 while not hit_stop:
                     char = proc.stdout.read(1)
                     if not char:
@@ -434,33 +465,58 @@ class ModelRunner:
                         initial_buffer += char
                         norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
 
-                        # 1. Clean match: clean_prompt appeared in initial_buffer (normalized)
+                        # 1. Chat Prompt Header Completion (target assistant header reached)
+                        if target_assistant_hdr and norm_buf.count(target_assistant_hdr) >= target_hdr_count:
+                            pos = -1
+                            for _ in range(target_hdr_count):
+                                pos = norm_buf.find(target_assistant_hdr, pos + 1)
+                            if pos != -1:
+                                prompt_stripped = True
+                                remainder = norm_buf[pos + len(target_assistant_hdr):]
+                                buffer = remainder.lstrip("\r\n ")
+                                accumulated_output = buffer
+                                initial_buffer = ""
+                                continue
+
+                        # 2. Clean match: clean_prompt appeared in initial_buffer (normalized)
                         if clean_prompt_norm and clean_prompt_norm in norm_buf:
                             prompt_stripped = True
                             remainder = norm_buf.split(clean_prompt_norm, 1)[1]
                             hdr_rem = strip_assistant_header(remainder)
-                            buffer = hdr_rem if hdr_rem is not None else remainder.lstrip("\r\n >\t")
+                            buffer = hdr_rem if hdr_rem is not None else remainder.lstrip("\r\n ")
                             accumulated_output = buffer
                             initial_buffer = ""
                             continue
 
-                        # 2. In-progress prefix match (strip prompt leaders like "> " and solitary \r mid-CRLF)
-                        cand = norm_buf.rstrip("\r\n").lstrip("\r\n >\t")
-                        if not cand or (clean_prompt_norm and clean_prompt_norm.startswith(cand)):
-                            continue
-
                         # 3. Check if clean_prompt start appears after some banner or menu
+                        cleaned_buf = re.sub(r"(^|\n)>\s?", r"\1", norm_buf)
                         prompt_head = clean_prompt_norm[:min(30, len(clean_prompt_norm))] if clean_prompt_norm else ""
-                        if prompt_head and prompt_head in norm_buf:
-                            idx = norm_buf.find(prompt_head)
-                            norm_buf = norm_buf[idx:]
-                            initial_buffer = norm_buf
+                        if prompt_head and prompt_head in cleaned_buf:
+                            idx = cleaned_buf.find(prompt_head)
+                            if idx > 0:
+                                cleaned_buf = cleaned_buf[idx:]
+                                raw_idx = initial_buffer.find(prompt_head)
+                                if raw_idx != -1:
+                                    initial_buffer = initial_buffer[raw_idx:]
+                                else:
+                                    initial_buffer = cleaned_buf
+
+                        # 4. In-progress prefix match or banner check (with prompt leaders stripped from lines)
+                        cand = cleaned_buf.rstrip("\r\n").lstrip("\r\n \t")
+                        cand_lower = cand.lower()
+                        norm_lower = norm_buf.lower()
+                        is_prefix = bool(cand and clean_prompt_norm and clean_prompt_norm.startswith(cand))
+                        is_banner = any(
+                            b in norm_lower or b.startswith(cand_lower) or cand_lower.startswith(b)
+                            for b in known_banner_prefixes
+                        )
+
+                        # If a known chat template header exists in prompt, wait for it as long as the stream is
+                        # currently outputting banners, prompt leaders (> ), or prompt echo prefixes
+                        if target_assistant_hdr and (is_prefix or is_banner or not cand) and len(norm_buf) < max_header_buffer_len:
                             continue
 
-                        # 4. Known banners buffering
-                        known_banners = ("/exit", "/quit", "/regen", "/clear", "/reset", "/read", "/glob", "main:", "llama_")
-                        is_banner = any(b.startswith(cand) or cand.startswith(b) for b in known_banners)
-                        if is_banner and len(norm_buf) < 512:
+                        if (is_prefix or is_banner or not cand) and len(norm_buf) < 4096:
                             continue
 
                         # 5. Diverged from prompt prefix and not a banner: output is genuine generated text
@@ -470,7 +526,7 @@ class ModelRunner:
                             buffer = hdr_div
                             accumulated_output = hdr_div
                         else:
-                            buffer = norm_buf.lstrip("\r\n >\t")
+                            buffer = norm_buf.lstrip("\r\n ")
                             accumulated_output = buffer
                         initial_buffer = ""
                     else:
@@ -520,9 +576,17 @@ class ModelRunner:
                 # Flush any remaining unstripped buffer if EOF was reached prematurely (CRIT-2)
                 if not prompt_stripped and initial_buffer:
                     norm_buf = initial_buffer.replace("\r\n", "\n").replace("\r", "\n")
-                    if clean_prompt_norm and clean_prompt_norm in norm_buf:
-                        buffer = norm_buf.split(clean_prompt_norm, 1)[1].lstrip("\r\n >\t") + buffer
-                    else:
+                    cand_lower = norm_buf.strip().lower()
+                    is_only_banner = any(cand_lower.startswith(b) or b in cand_lower for b in known_banner_prefixes)
+                    if target_assistant_hdr and norm_buf.count(target_assistant_hdr) >= target_hdr_count:
+                        pos = -1
+                        for _ in range(target_hdr_count):
+                            pos = norm_buf.find(target_assistant_hdr, pos + 1)
+                        if pos != -1:
+                            buffer = norm_buf[pos + len(target_assistant_hdr):].lstrip("\r\n ") + buffer
+                    elif clean_prompt_norm and clean_prompt_norm in norm_buf:
+                        buffer = norm_buf.split(clean_prompt_norm, 1)[1].lstrip("\r\n ") + buffer
+                    elif not is_only_banner:
                         hdr = strip_assistant_header(norm_buf)
                         if hdr is not None:
                             buffer = hdr + buffer
