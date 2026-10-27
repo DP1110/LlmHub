@@ -215,6 +215,70 @@ def test_chat_completions_streaming_sse(mock_registry, client):
         state.model_manager.loaded_models.pop("mock-model", None)
 
 @patch.object(state, "registry")
+def test_chat_completions_direct_cli_streaming(mock_registry, client):
+    mock_record = MagicMock()
+    mock_record.tag = "cli-model"
+    mock_record.file_path = "cli.gguf"
+    mock_registry.find_model.return_value = mock_record
+
+    b = MockBackend()
+    b.llm = None
+    b._cli_binary = "/usr/bin/llama-cli"
+    lm = LoadedModel(
+        tag="cli-model",
+        file_path=Path("cli-model.gguf"),
+        backend=b,
+        metadata=b.metadata,
+        template_engine=ChatTemplateEngine(None),
+        n_ctx=2048,
+        n_threads=4,
+        weights_bytes=100 * 1024 * 1024,
+        kv_cache_bytes=20 * 1024 * 1024,
+        overhead_bytes=10 * 1024 * 1024,
+        total_memory_bytes=130 * 1024 * 1024,
+        pinned=False
+    )
+    state.model_manager.loaded_models["cli-model"] = lm
+    try:
+        payload = {
+            "model": "cli-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ],
+            "max_tokens": 128,
+            "stream": True
+        }
+        resp = client.post("/v1/chat/completions", json=payload)
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+        lines = resp.text.strip().split("\n\n")
+        chunks = []
+        for line in lines:
+            line_str = line.strip()
+            if line_str.startswith("data: "):
+                raw = line_str[6:].strip()
+                if raw == "[DONE]":
+                    chunks.append("[DONE]")
+                else:
+                    chunks.append(json.loads(raw))
+
+        assert len(chunks) >= 4
+        # Chunk 0: initial role delta
+        assert chunks[0]["choices"][0]["delta"]["role"] == "assistant"
+        # Content chunks
+        assert chunks[1]["choices"][0]["delta"]["content"] == "Hello"
+        assert chunks[2]["choices"][0]["delta"]["content"] == " world"
+        # Stop chunk with usage
+        assert chunks[3]["choices"][0]["finish_reason"] == "stop"
+        assert "usage" in chunks[3]
+        assert chunks[3]["usage"]["completion_tokens"] >= 2
+        # Final done marker
+        assert chunks[-1] == "[DONE]"
+    finally:
+        state.model_manager.loaded_models.pop("cli-model", None)
+
+@patch.object(state, "registry")
 def test_v1_get_model_by_id(mock_registry, client):
     mock_record = MagicMock()
     mock_record.tag = "qwen2.5:q4_k_m"

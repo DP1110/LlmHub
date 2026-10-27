@@ -1022,6 +1022,20 @@
         "Expand known_banner_prefixes to buffer startup diagnostic lines (Loading model, available commands, etc.)",
         "100% test pass rate across all 226 tests in test suite"
       ]
+    },
+    {
+      "id": "US-078",
+      "title": "Web Page LLM Chat Direct CLI Streaming and Low-Token Defaults",
+      "status": "done",
+      "description": "Fix web page chat by adding a direct CLI inference bypass in /v1/chat/completions that streams from llama-cli subprocess without scheduler/batch-engine pipeline. Lower default max_tokens to 128.",
+      "acceptance_criteria": [
+        "Web UI chat streams LLM responses from locally installed GGUF models",
+        "Direct CLI inference path bypasses scheduler when llama-cpp-python is not installed",
+        "Default max_tokens reduced from 512 to 128",
+        "Default system prompt shortened to minimize token usage",
+        "No changes to Termux terminal LLM code",
+        "All 227 existing tests pass without regression"
+      ]
     }
   ]
 }

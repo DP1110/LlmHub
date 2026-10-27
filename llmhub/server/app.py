@@ -813,6 +813,145 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(e))
 
         stop_criteria = [req.stop] if isinstance(req.stop, str) else req.stop
+
+        # ── Direct CLI Inference Bypass ──────────────────────────────────────
+        # When the backend is a native llama-cli subprocess (no llama-cpp-python
+        # bindings), bypass the scheduler/batch-engine pipeline and stream tokens
+        # directly from the subprocess.  This matches the reliable terminal path
+        # and avoids multi-cycle prefill overhead of the batch engine.
+        _backend = loaded_model.backend
+        _use_direct_cli = (
+            getattr(_backend, "llm", None) is None
+            and getattr(_backend, "_cli_binary", None) is not None
+        )
+
+        if _use_direct_cli and req.stream:
+            direct_sid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+            async def _direct_stream() -> AsyncGenerator[str, None]:
+                created_ts = int(time.time())
+                gen_tokens = 0
+                p_tokens = 0
+                fin_reason = "stop"
+                admitted = False
+
+                try:
+                    # 1. Spawn llama-cli subprocess session
+                    async with loaded_model.inference_lock:
+                        sess = await asyncio.to_thread(
+                            _backend.new_session,
+                            session_id=direct_sid,
+                            prompt=prompt,
+                            max_tokens=req.max_tokens,
+                            temperature=req.temperature,
+                            top_p=req.top_p,
+                            stop=stop_criteria,
+                        )
+                    p_tokens = len(sess.prompt_tokens) if sess.prompt_tokens else 0
+                    loaded_model.last_active_time = time.monotonic()
+                    if hasattr(loaded_model, "inc_active_sessions"):
+                        loaded_model.inc_active_sessions()
+                    else:
+                        loaded_model.active_sessions += 1
+                    admitted = True
+
+                    # 2. Role header chunk
+                    yield "data: {}\n\n".format(json.dumps({
+                        "id": direct_sid, "object": "chat.completion.chunk",
+                        "created": created_ts, "model": req.model,
+                        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                    }))
+
+                    # 3. Fast-forward fake prefill (CLI handles prefill internally)
+                    while True:
+                        async with loaded_model.inference_lock:
+                            _, pf_done = await asyncio.to_thread(
+                                _backend.prefill_chunk, direct_sid, 65536
+                            )
+                        if pf_done:
+                            break
+
+                    # 4. Decode loop – stream token deltas as SSE
+                    ttft_recorded = False
+                    while gen_tokens < req.max_tokens:
+                        if await request.is_disconnected():
+                            fin_reason = "cancelled"
+                            break
+
+                        async with loaded_model.inference_lock:
+                            res = await asyncio.to_thread(
+                                _backend.decode_step, direct_sid, 4
+                            )
+                        loaded_model.last_active_time = time.monotonic()
+
+                        if not ttft_recorded and res.text_deltas:
+                            ttft_s = time.perf_counter() - req_start_t
+                            state.metrics.ttft_seconds.observe(ttft_s, labels={"model": req.model})
+                            ttft_recorded = True
+
+                        for dt in res.text_deltas:
+                            yield "data: {}\n\n".format(json.dumps({
+                                "id": direct_sid, "object": "chat.completion.chunk",
+                                "created": created_ts, "model": req.model,
+                                "choices": [{"index": 0, "delta": {"content": dt}, "finish_reason": None}],
+                            }))
+
+                        gen_tokens += len(res.tokens)
+                        if res.done:
+                            fin_reason = res.stop_reason or "stop"
+                            break
+
+                        await asyncio.sleep(0)  # cooperative yield
+
+                    # 5. Final chunk + [DONE]
+                    usage = {
+                        "prompt_tokens": p_tokens,
+                        "completion_tokens": gen_tokens,
+                        "total_tokens": p_tokens + gen_tokens,
+                    }
+                    yield "data: {}\n\n".format(json.dumps({
+                        "id": direct_sid, "object": "chat.completion.chunk",
+                        "created": created_ts, "model": req.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": fin_reason}],
+                        "usage": usage,
+                    }))
+                    yield "data: [DONE]\n\n"
+
+                    state.metrics.requests_total.inc(
+                        labels={"model": req.model, "status": "success", "tenant": "direct"}
+                    )
+                    state.metrics.tokens_generated_total.inc(gen_tokens, labels={"model": req.model})
+                    state.metrics.prompt_tokens_total.inc(p_tokens, labels={"model": req.model})
+
+                except Exception as e:
+                    logger.error("Direct CLI inference error for model '%s': %s", req.model, e, exc_info=True)
+                    yield "data: {}\n\n".format(json.dumps({"error": str(e)}))
+                    state.metrics.requests_total.inc(
+                        labels={"model": req.model, "status": "error", "tenant": "direct"}
+                    )
+                finally:
+                    try:
+                        async with loaded_model.inference_lock:
+                            await asyncio.to_thread(_backend.close_session, direct_sid)
+                    except Exception:
+                        pass
+                    if admitted:
+                        if hasattr(loaded_model, "dec_active_sessions"):
+                            loaded_model.dec_active_sessions()
+                        else:
+                            loaded_model.active_sessions = max(0, loaded_model.active_sessions - 1)
+
+            return StreamingResponse(
+                _direct_stream(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+        # ── End Direct CLI Inference Bypass ──────────────────────────────────
+
         session_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
         tenant_id = req.tenant_id or req.user or request.headers.get("X-Tenant-ID") or "default"
 

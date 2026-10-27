@@ -613,14 +613,14 @@
           <div class="sidebar-section">
             <div class="slider-row">
               <label class="sidebar-label">Max Tokens</label>
-              <span id="max-tok-val" class="font-mono">512</span>
+              <span id="max-tok-val" class="font-mono">128</span>
             </div>
-            <input type="range" id="chat-max-tokens" min="64" max="4096" step="64" value="512" oninput="document.getElementById('max-tok-val').textContent=this.value">
+            <input type="range" id="chat-max-tokens" min="32" max="2048" step="32" value="128" oninput="document.getElementById('max-tok-val').textContent=this.value">
           </div>
 
           <div class="sidebar-section">
             <label class="sidebar-label">System Prompt</label>
-            <textarea id="chat-system-prompt" rows="3" placeholder="You are a helpful, offline AI assistant.">You are a helpful, offline AI assistant running locally on LLMHub.</textarea>
+            <textarea id="chat-system-prompt" rows="3" placeholder="You are a helpful, offline AI assistant.">You are a helpful assistant.</textarea>
           </div>
 
           <div class="sidebar-section">
@@ -1296,7 +1296,7 @@
         const tempElem = document.getElementById('chat-temp');
         const maxTokElem = document.getElementById('chat-max-tokens');
         const temperature = tempElem ? parseFloat(tempElem.value) : 0.7;
-        const max_tokens = maxTokElem ? parseInt(maxTokElem.value) : 512;
+        const max_tokens = maxTokElem ? parseInt(maxTokElem.value) : 128;
 
         contentElem.textContent = '● Connecting...';
 
